@@ -105,10 +105,10 @@ fn main() {
     let mut success = true;
     for (i, path) in src_paths.iter().enumerate() {
         match env.compile(path) {
-            Ok(message) => print!("Compiling {}", message),
+            Ok(message) => print!("Compiled {}", message),
             Err(error) => {
                 println!(
-                    "Compiling {}Compilation failed{}.{}",
+                    "Attempted to compile {}Compilation failed{}.{}",
                     error.message,
                     if let Some(code) = error.code {
                         format!(" with code {}", code)
