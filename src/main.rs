@@ -3,9 +3,23 @@ use std::path::{Path, PathBuf};
 use std::convert::AsRef;
 use std::fs;
 use std::ffi::OsStr;
+use std::io::ErrorKind as IoErrorKind;
 
 enum Host {
     Windows,
+}
+
+#[derive(Clone, Copy)]
+enum CompileMode {
+    Debug,
+    Release,
+}
+
+enum CxxStandard {
+    Cxx11,
+    Cxx14,
+    Cxx17,
+    Cxx20,
 }
 
 struct Environment {
@@ -20,17 +34,43 @@ struct CompilerError {
     message: String,
 }
 
+
 impl Environment {
-    fn new(host: Host, include_paths: impl IntoIterator<Item=impl AsRef<Path>>, definitions: impl IntoIterator<Item=impl AsRef<str>>, compiler_path: impl Into<PathBuf>, linker_path: impl Into<PathBuf>) -> Self {
+    fn new(
+        host: Host,
+        compile_mode: CompileMode,
+        options: CxxOptions,
+        include_paths: impl IntoIterator<Item=impl AsRef<Path>>,
+        definitions: impl IntoIterator<Item=impl AsRef<str>>,
+        compiler_path: impl Into<PathBuf>, linker_path: impl Into<PathBuf>
+    ) -> Self {
         let compiler_flags = match host {
             Host::Windows => {
                 let mut flags = vec![
                     "/W3".to_string(),
-                    "/GR".to_string(),
+                    "/Zi".to_string(),
                     "/EHsc".to_string(),
-                    "/std:c++latest".to_string(),
                     "/c".to_string()
                 ];
+                if options.rtti {
+                    flags.push("/GR".to_string());
+                } else {
+                    flags.push("/GR-".to_string());
+                }
+                match options.standard {
+                    CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".to_string()),
+                    CxxStandard::Cxx17 => flags.push("/std:c++17".to_string()),
+                    CxxStandard::Cxx20 => flags.push("/std:c++latest".to_string()),
+                }
+                match compile_mode {
+                    CompileMode::Debug => {
+                        flags.push("/MDd".to_string());
+                        flags.push("/RTC1".to_string());
+                    },
+                    CompileMode::Release => {
+                        flags.push("/O2".to_string());
+                    },
+                }
                 for definition in definitions {
                     flags.push(format!("/D{}", definition.as_ref()));
                 }
@@ -48,9 +88,13 @@ impl Environment {
         }
     }
 
-    fn compile(&self, path: impl AsRef<Path>) -> Result<String, CompilerError> {
+    fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>) -> Result<String, CompilerError> {
         let mut args = self.compiler_flags.clone();
-        args.push(path.as_ref().to_str().unwrap().to_string());
+        let path = path.as_ref();
+        let obj_path = obj_path.as_ref().to_str().unwrap();
+        args.push(format!(r"/Fo{}\", obj_path));
+        args.push(format!(r"/Fd{}\{}.pdb", obj_path, path.file_stem().unwrap().to_str().unwrap().to_string()));
+        args.push(path.to_str().unwrap().to_string());
         let output = Command::new(&self.compiler_path)
             .args(&args)
             .output()
@@ -67,6 +111,20 @@ impl Environment {
     }
 }
 
+struct CxxOptions {
+    rtti: bool,
+    standard: CxxStandard,
+}
+
+impl Default for CxxOptions {
+    fn default() -> Self {
+        CxxOptions {
+            rtti: false,
+            standard: CxxStandard::Cxx20,
+        }
+    }
+}
+
 fn main() {
     if !cfg!(target_os = "windows") {
         println!("Unsupported host OS: only Windows is supported.");
@@ -75,8 +133,11 @@ fn main() {
 
     let compiler_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\cl.exe";
     let linker_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\link.exe";
+    let compile_mode = CompileMode::Debug;
     let env = Environment::new(
         Host::Windows,
+        compile_mode,
+        CxxOptions::default(),
         &[
             r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\ATLMFC\include",
             r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\include",
@@ -90,7 +151,38 @@ fn main() {
         compiler_path,
         linker_path,
     );
-    let src_paths: Vec<_> = fs::read_dir("src").unwrap().filter_map(|entry| {
+    let src_dir = match fs::read_dir("src") {
+        Ok(src_dir) => src_dir,
+        Err(error) => {
+            if let IoErrorKind::NotFound = error.kind() {
+                println!("src directory does not exist in current working directory. Cannot build.");
+            } else {
+                println!("Unable to read src directory in current working directory. Cannot build.");
+            }
+            std::process::exit(1);
+        }
+    };
+
+    // Create abs/debug or abs/release, if it doesn't exist already
+    let artifact_subdirectory = match compile_mode {
+        CompileMode::Debug => "debug",
+        CompileMode::Release => "release",
+    };
+    let artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
+    let mut obj_path = artifact_path.clone();
+    obj_path.push("obj");
+    if let Some(kind) = fs::create_dir_all(&obj_path).err().map(|error| error.kind()) {
+        println!(
+            "Unable to create abs directory structure: {:?}. Cannot build.",
+            match kind {
+                IoErrorKind::PermissionDenied => "permission denied".to_string(),
+                kind => format!("{:?}", kind),
+            }
+        );
+        std::process::exit(1);
+    }
+
+    let src_paths: Vec<_> = src_dir.filter_map(|entry| {
         let entry = entry.unwrap();
         if entry.file_type().unwrap().is_file() {
             let path = entry.path();
@@ -104,7 +196,7 @@ fn main() {
 
     let mut success = true;
     for (i, path) in src_paths.iter().enumerate() {
-        match env.compile(path) {
+        match env.compile(path, &obj_path) {
             Ok(message) => print!("Compiled {}", message),
             Err(error) => {
                 println!(
