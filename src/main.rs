@@ -9,7 +9,7 @@ enum Host {
 }
 
 struct Environment {
-    compiler_flags: Vec<&'static str>,
+    compiler_flags: Vec<String>,
     compiler_path: PathBuf,
     linker_path: PathBuf,
 }
@@ -21,9 +21,25 @@ struct CompilerError {
 }
 
 impl Environment {
-    fn new(host: Host, compiler_path: impl Into<PathBuf>, linker_path: impl Into<PathBuf>) -> Self {
+    fn new(host: Host, include_paths: impl IntoIterator<Item=impl AsRef<Path>>, definitions: impl IntoIterator<Item=impl AsRef<str>>, compiler_path: impl Into<PathBuf>, linker_path: impl Into<PathBuf>) -> Self {
         let compiler_flags = match host {
-            Host::Windows => vec!["/W3", "/c"],
+            Host::Windows => {
+                let mut flags = vec![
+                    "/W3".to_string(),
+                    "/GR".to_string(),
+                    "/EHsc".to_string(),
+                    "/std:c++latest".to_string(),
+                    "/c".to_string()
+                ];
+                for definition in definitions {
+                    flags.push(format!("/D{}", definition.as_ref()));
+                }
+                for path in include_paths {
+                    flags.push("/I".to_string());
+                    flags.push(path.as_ref().to_str().unwrap().to_string());
+                }
+                flags
+            },
         };
         Environment {
             compiler_flags,
@@ -34,7 +50,7 @@ impl Environment {
 
     fn compile(&self, path: impl AsRef<Path>) -> Result<String, CompilerError> {
         let mut args = self.compiler_flags.clone();
-        args.push(path.as_ref().to_str().unwrap());
+        args.push(path.as_ref().to_str().unwrap().to_string());
         let output = Command::new(&self.compiler_path)
             .args(&args)
             .output()
@@ -54,7 +70,21 @@ impl Environment {
 fn main() {
     let compiler_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\cl.exe";
     let linker_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\link.exe";
-    let env = Environment::new(Host::Windows, compiler_path, linker_path);
+    let env = Environment::new(
+        Host::Windows,
+        &[
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\ATLMFC\include",
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\include",
+            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\ucrt",
+            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\shared",
+            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\um",
+            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\winrt",
+            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\cppwinrt",
+        ],
+        &["_WINDOWS", "WIN32", "UNICODE", "_USE_MATH_DEFINES"],
+        compiler_path,
+        linker_path,
+    );
     let src_paths: Vec<_> = fs::read_dir("src").unwrap().filter_map(|entry| {
         let entry = entry.unwrap();
         if entry.file_type().unwrap().is_file() {
