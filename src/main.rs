@@ -68,6 +68,11 @@ impl Environment {
 }
 
 fn main() {
+    if !cfg!(target_os = "windows") {
+        println!("Unsupported host OS: only Windows is supported.");
+        std::process::exit(1);
+    }
+
     let compiler_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\cl.exe";
     let linker_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\link.exe";
     let env = Environment::new(
