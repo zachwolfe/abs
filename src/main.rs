@@ -63,7 +63,9 @@ struct BuildOptions {
 enum Subcommand {
     Build(BuildOptions),
     Run(BuildOptions),
+    Debug(BuildOptions),
     Clean,
+    Kill,
 }
 
 #[derive(Clap)]
@@ -298,7 +300,11 @@ impl Default for CxxOptions {
     }
 }
 
-
+fn kill_debugger() {
+    let _output = Command::new("taskkill")
+        .args(&["/IM", "devenv.exe", "/F"])
+        .output();
+}
 
 fn main() {
     let mut success = true;
@@ -325,8 +331,11 @@ fn main() {
     }
 
     let options = Options::parse();
+    let compiler_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\cl.exe";
+    let linker_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\link.exe";
+    let devenv_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\devenv.exe";
     let mut artifact_path = match &options.sub_command {
-        Subcommand::Build(build_options) | Subcommand::Run(build_options) => {
+        Subcommand::Build(build_options) | Subcommand::Run(build_options) | Subcommand::Debug(build_options) => {
             let src_dir_path = Path::new("src");
             let src_dir = match fs::read_dir(src_dir_path) {
                 Ok(src_dir) => src_dir,
@@ -339,8 +348,6 @@ fn main() {
                 }
             };
             
-            let compiler_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\cl.exe";
-            let linker_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\link.exe";
             // Create abs/debug or abs/release, if it doesn't exist already
             let artifact_subdirectory = match build_options.compile_mode {
                 CompileMode::Debug => "debug",
@@ -413,12 +420,29 @@ fn main() {
             }
             return;
         },
+        Subcommand::Kill => {
+            kill_debugger();
+            println!("Successfully killed debugger.");
+            return;
+        },
     };
 
-    if let Subcommand::Run(_) = options.sub_command {
-        artifact_path.push("main.exe");
-        Command::new(artifact_path)
-            .spawn()
-            .unwrap();
+    let exe_name = "main.exe";
+    match options.sub_command {
+        Subcommand::Run(_) => {
+            artifact_path.push(exe_name);
+            Command::new(artifact_path)
+                .spawn()
+                .unwrap();
+        },
+        Subcommand::Debug(_) => {
+            kill_debugger();
+            artifact_path.push(exe_name);
+            Command::new(devenv_path)
+                .args(&["/debugexe".to_string(), artifact_path.to_str().unwrap().to_string()])
+                .spawn()
+                .unwrap();
+        },
+        _ => {},
     }
 }
