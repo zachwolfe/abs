@@ -180,9 +180,33 @@ impl Default for CxxOptions {
 }
 
 fn main() {
-    if !cfg!(target_os = "windows") {
-        println!("Unsupported host OS: only Windows is supported.");
+    let mut success = true;
+    fn _build_failed() -> ! {
+        println!("\nBuild failed.");
         std::process::exit(1);
+    }
+    macro_rules! check_success {
+        () => {
+            if !success {
+                _build_failed();
+            }
+        }
+    }
+    macro_rules! fail {
+        ($($t:tt)*) => {
+            println!($($t)*);
+            success = false;
+        }
+    }
+    macro_rules! fail_immediate {
+        ($($t:tt)*) => {
+            println!($($t)*);
+            _build_failed();
+        }
+    }
+
+    if !cfg!(target_os = "windows") {
+        fail_immediate!("Unsupported host OS: only Windows is supported.");
     }
 
     let compiler_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\cl.exe";
@@ -215,11 +239,10 @@ fn main() {
         Ok(src_dir) => src_dir,
         Err(error) => {
             if let IoErrorKind::NotFound = error.kind() {
-                println!("src directory does not exist in current working directory. Cannot build.");
+                fail_immediate!("src directory does not exist in current working directory.");
             } else {
-                println!("Unable to read src directory in current working directory. Cannot build.");
+                fail_immediate!("Unable to read src directory in current working directory.");
             }
-            std::process::exit(1);
         }
     };
 
@@ -231,15 +254,15 @@ fn main() {
     let artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
     let mut obj_path = artifact_path.clone();
     obj_path.push("obj");
+
     if let Some(kind) = fs::create_dir_all(&obj_path).err().map(|error| error.kind()) {
-        println!(
-            "Unable to create abs directory structure: {:?}. Cannot build.",
+        fail_immediate!(
+            "Unable to create abs directory structure: {:?}.",
             match kind {
                 IoErrorKind::PermissionDenied => "permission denied".to_string(),
                 kind => format!("{:?}", kind),
             }
         );
-        std::process::exit(1);
     }
 
     let src_paths: Vec<_> = src_dir.filter_map(|entry| {
@@ -254,7 +277,6 @@ fn main() {
         None
     }).collect();
 
-    let mut success = true;
     let mut obj_paths = Vec::new();
     for (i, path) in src_paths.iter().enumerate() {
         match env.compile(path, &obj_path) {
@@ -263,7 +285,7 @@ fn main() {
                 obj_paths.push(get_artifact_path(path, &obj_path, "obj"));
             },
             Err(error) => {
-                println!(
+                fail!(
                     "Attempted to compile {}Compilation failed{}.{}",
                     error.message,
                     if let Some(code) = error.code {
@@ -277,19 +299,13 @@ fn main() {
                         "\n"
                     }
                 );
-                success = false;
             }
         }
     }
+    check_success!();
     let lib_paths = &["avrt.lib"];
     if let Some(error) = env.link(&artifact_path, obj_paths, lib_paths).err() {
-        print!("{}", error.message);
-        success = false;
+        fail_immediate!("{}", error.message);
     }
-    if success {
-        println!("\nBuild succeeded.");
-    } else {
-        println!("\nBuild failed.");
-        std::process::exit(1);
-    }
+    println!("\nBuild succeeded.");
 }
