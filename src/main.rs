@@ -306,6 +306,134 @@ fn kill_debugger() {
         .output();
 }
 
+struct ToolchainPaths {
+    compiler_path: PathBuf,
+    linker_path: PathBuf,
+    debugger_path: PathBuf,
+    include_paths: Vec<PathBuf>,
+    lib_paths: Vec<PathBuf>,
+}
+
+impl ToolchainPaths {
+    fn find() -> io::Result<ToolchainPaths> {
+        let mut path = PathBuf::from(r"C:\Program Files (x86)");
+        let program_files = path.clone();
+        path.push("Microsoft Visual Studio");
+        let year = fs::read_dir(&path)?.filter_map(|entry| {
+            if let Ok(entry) = entry {
+                if let Ok(file_type) = entry.file_type() {
+                    let name = entry.path().file_name().unwrap().to_str().unwrap().to_string();
+                    if let Ok(number) = name.parse::<u16>() {
+                        if file_type.is_dir() {
+                            Some((name, number))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+            .max_by_key(|&(ref _name, year)| year)
+            .map(|(name, _year)| name)
+            .unwrap();
+        path.push(year);
+        path.push("Community");
+        let community = path.clone();
+
+        path.push("VC");
+        path.push("Tools");
+        path.push("MSVC");
+
+        // TODO: error handling
+        path.push(fs::read_dir(&path)?.next().unwrap().unwrap().file_name());
+        let version = path.clone();
+
+        path.push("bin");
+        path.push("Hostx64");
+        path.push("x64");
+        let bin = path.clone();
+
+        path.push("cl.exe");
+        let compiler_path = path;
+
+        let mut path = bin;
+        path.push("link.exe");
+        let linker_path = path;
+
+        let mut include_paths = Vec::new();
+        let mut lib_paths = Vec::new();
+        let mut path = version.clone();
+        path.push("ATLMFC");
+
+        let atlmfc = path.clone();
+        path.push("include");
+        include_paths.push(path);
+
+        let mut path = atlmfc;
+        path.push("lib");
+        path.push("x64");
+        lib_paths.push(path);
+
+        let mut path = version.clone();
+        path.push("include");
+        include_paths.push(path);
+
+        let mut path = version;
+        path.push("lib");
+        path.push("x64");
+        lib_paths.push(path);
+
+        let mut path = community;
+        path.push("Community");
+        path.push("Common7");
+        path.push("IDE");
+        path.push("devenv.exe");
+        let debugger_path = path;
+
+        let mut path = program_files;
+        path.push("Windows Kits");
+        path.push("10");
+        let win10 = path.clone();
+
+        path.push("Include");
+        // TODO: error handling
+        path.push(fs::read_dir(&path)?.next().unwrap().unwrap().file_name());
+        for name in &["ucrt", "shared", "um", "winrt", "cppwinrt"] {
+            path.push(name);
+            include_paths.push(path.clone());
+            path.pop();
+        }
+
+        let mut path = win10;
+        path.push("Lib");
+        // TODO: error handling
+        path.push(fs::read_dir(&path)?.next().unwrap().unwrap().file_name());
+        for name in &["ucrt", "um"] {
+            path.push(name);
+            path.push("x64");
+            lib_paths.push(path.clone());
+            path.pop();
+            path.pop();
+        }
+
+        Ok(
+            ToolchainPaths {
+                compiler_path,
+                linker_path,
+                debugger_path,
+                include_paths,
+                lib_paths,
+            }
+        )
+    }
+}
+
 fn main() {
     let mut success = true;
     fn _build_failed() -> ! {
@@ -331,10 +459,7 @@ fn main() {
     }
 
     let options = Options::parse();
-    let compiler_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\cl.exe";
-    let linker_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\link.exe";
-    let devenv_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\devenv.exe";
-    let mut artifact_path = match &options.sub_command {
+    let (toolchain_paths, mut artifact_path) = match &options.sub_command {
         Subcommand::Build(build_options) | Subcommand::Run(build_options) | Subcommand::Debug(build_options) => {
             let src_dir_path = Path::new("src");
             let src_dir = match fs::read_dir(src_dir_path) {
@@ -347,6 +472,10 @@ fn main() {
                     }
                 }
             };
+
+            print!("Finding toolchain paths...");
+            let toolchain_paths = ToolchainPaths::find().unwrap();
+            println!("complete.");
             
             // Create abs/debug or abs/release, if it doesn't exist already
             let artifact_subdirectory = match build_options.compile_mode {
@@ -377,24 +506,11 @@ fn main() {
                 Host::Windows,
                 build_options.compile_mode,
                 CxxOptions::default(),
-                &[
-                    r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\ATLMFC\include",
-                    r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\include",
-                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\ucrt",
-                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\shared",
-                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\um",
-                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\winrt",
-                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\cppwinrt",
-                ],
-                &[
-                    r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\ATLMFC\lib\x86",
-                    r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\lib\x86",
-                    r"C:\Program Files (x86)\Windows Kits\10\lib\10.0.18362.0\ucrt\x86",
-                    r"C:\Program Files (x86)\Windows Kits\10\lib\10.0.18362.0\um\x86",
-                ],
+                &toolchain_paths.include_paths,
+                &toolchain_paths.lib_paths,
                 &["_WINDOWS", "WIN32", "UNICODE", "_USE_MATH_DEFINES"],
-                compiler_path,
-                linker_path,
+                &toolchain_paths.compiler_path,
+                &toolchain_paths.linker_path,
                 src_dir_path,
                 objs_path,
             );
@@ -407,7 +523,7 @@ fn main() {
                 fail_immediate!("{}", error.message);
             }
             println!("Build succeeded.");
-            artifact_path
+            (toolchain_paths, artifact_path)
         },
         Subcommand::Clean => {
             fn _cleaned_successfully() { println!("Cleaned successfully."); }
@@ -438,7 +554,7 @@ fn main() {
         Subcommand::Debug(_) => {
             kill_debugger();
             artifact_path.push(exe_name);
-            Command::new(devenv_path)
+            Command::new(&toolchain_paths.debugger_path)
                 .args(&["/debugexe".to_string(), artifact_path.to_str().unwrap().to_string()])
                 .spawn()
                 .unwrap();
