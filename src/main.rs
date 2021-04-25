@@ -4,6 +4,7 @@ use std::convert::AsRef;
 use std::fs;
 use std::ffi::OsStr;
 use std::io::ErrorKind as IoErrorKind;
+use std::os::windows::prelude::*;
 
 enum Host {
     Windows,
@@ -252,10 +253,9 @@ fn main() {
         CompileMode::Release => "release",
     };
     let artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
-    let mut obj_path = artifact_path.clone();
-    obj_path.push("obj");
-
-    if let Some(kind) = fs::create_dir_all(&obj_path).err().map(|error| error.kind()) {
+    let mut objs_path = artifact_path.clone();
+    objs_path.push("obj");
+    if let Some(kind) = fs::create_dir_all(&objs_path).err().map(|error| error.kind()) {
         fail_immediate!(
             "Unable to create abs directory structure: {:?}.",
             match kind {
@@ -265,40 +265,56 @@ fn main() {
         );
     }
 
-    let src_paths: Vec<_> = src_dir.filter_map(|entry| {
+    let mut header_paths = Vec::new();
+    let mut src_paths = Vec::new();
+    for entry in src_dir {
         let entry = entry.unwrap();
         if entry.file_type().unwrap().is_file() {
             let path = entry.path();
-            if path.extension() == Some(OsStr::new("cpp")) {
-                return Some(entry.path());
+            if path.extension() == Some(OsStr::new("cpp")) || path.extension() == Some(OsStr::new("cxx")) || path.extension() == Some(OsStr::new("cc")) {
+                src_paths.push(path);
+            } else if path.extension() == Some(OsStr::new("h")) || path.extension() == Some(OsStr::new("hpp")) || path.extension() == Some(OsStr::new("hxx")) {
+                header_paths.push(path);
             }
+        } else if entry.file_type().unwrap().is_dir() {
+            // TODO: recursion
         }
-
-        None
-    }).collect();
+    }
 
     let mut obj_paths = Vec::new();
+    let newest_header = header_paths.iter().map(|header| {
+        fs::metadata(header).unwrap().last_write_time()
+    }).max().unwrap_or(0);
     for (i, path) in src_paths.iter().enumerate() {
-        match env.compile(path, &obj_path) {
-            Ok(message) => {
-                print!("Compiled {}", message);
-                obj_paths.push(get_artifact_path(path, &obj_path, "obj"));
-            },
-            Err(error) => {
-                fail!(
-                    "Attempted to compile {}Compilation failed{}.{}",
-                    error.message,
-                    if let Some(code) = error.code {
-                        format!(" with code {}", code)
-                    } else {
-                        String::new()
-                    },
-                    if i == src_paths.len()-1 {
-                        ""
-                    } else {
-                        "\n"
-                    }
-                );
+        let obj_path = get_artifact_path(path, &objs_path, "obj");
+        obj_paths.push(obj_path.clone());
+        let mut needs_compile = true;
+        let src_modified = fs::metadata(path).unwrap().last_write_time();
+        if let Ok(metadata) = fs::metadata(&obj_path) {
+            let obj_modified = metadata.last_write_time();
+            if obj_modified > newest_header && obj_modified > src_modified {
+                needs_compile = false;
+            }
+        }
+        if needs_compile {
+            match env.compile(path, &objs_path) {
+                Ok(message) => print!("Compiled {}", message),
+                Err(error) => {
+                    fail!(
+                        "Attempted to compile {}Compilation failed{}.{}",
+                        error.message,
+                        if let Some(code) = error.code {
+                            format!(" with code {}", code)
+                        } else {
+                            String::new()
+                        },
+                        if i == src_paths.len()-1 {
+                            ""
+                        } else {
+                            "\n"
+                        }
+                    );
+                }
             }
         }
     }
