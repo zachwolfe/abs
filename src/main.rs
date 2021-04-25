@@ -5,15 +5,29 @@ use std::fs;
 use std::ffi::OsStr;
 use std::io::{self, ErrorKind as IoErrorKind};
 use std::os::windows::prelude::*;
+use std::str::FromStr;
+
+use clap::Clap;
 
 enum Host {
     Windows,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clap, Clone, Copy)]
 enum CompileMode {
     Debug,
     Release,
+}
+
+impl FromStr for CompileMode {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "debug" => Ok(CompileMode::Debug),
+            "release" => Ok(CompileMode::Release),
+            _ => Err("no match"),
+        }
+    }
 }
 
 enum CxxStandard {
@@ -39,6 +53,24 @@ struct BuildError {
     message: String,
 }
 
+#[derive(Clap)]
+struct BuildOptions {
+    #[clap(default_value="debug")]
+    compile_mode: CompileMode,
+}
+
+#[derive(Clap)]
+enum Subcommand {
+    Build(BuildOptions),
+    Run(BuildOptions),
+    Clean,
+}
+
+#[derive(Clap)]
+struct Options {
+    #[clap(subcommand)]
+    sub_command: Subcommand,
+}
 
 impl Environment {
     fn new(
@@ -266,6 +298,8 @@ impl Default for CxxOptions {
     }
 }
 
+
+
 fn main() {
     let mut success = true;
     fn _build_failed() -> ! {
@@ -290,79 +324,101 @@ fn main() {
         fail_immediate!("Unsupported host OS: only Windows is supported.");
     }
 
-    let compiler_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\cl.exe";
-    let linker_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\link.exe";
-    let compile_mode = CompileMode::Debug;
-    
-    let src_dir_path = Path::new("src");
-    let src_dir = match fs::read_dir(src_dir_path) {
-        Ok(src_dir) => src_dir,
-        Err(error) => {
-            if let IoErrorKind::NotFound = error.kind() {
-                fail_immediate!("src directory does not exist in current working directory.");
-            } else {
-                fail_immediate!("Unable to read src directory in current working directory.");
+    let options = Options::parse();
+    let mut artifact_path = match &options.sub_command {
+        Subcommand::Build(build_options) | Subcommand::Run(build_options) => {
+            let src_dir_path = Path::new("src");
+            let src_dir = match fs::read_dir(src_dir_path) {
+                Ok(src_dir) => src_dir,
+                Err(error) => {
+                    if let IoErrorKind::NotFound = error.kind() {
+                        fail_immediate!("src directory does not exist in current working directory.");
+                    } else {
+                        fail_immediate!("Unable to read src directory in current working directory.");
+                    }
+                }
+            };
+            
+            let compiler_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\cl.exe";
+            let linker_path = r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\bin\Hostx86\x86\link.exe";
+            // Create abs/debug or abs/release, if it doesn't exist already
+            let artifact_subdirectory = match build_options.compile_mode {
+                CompileMode::Debug => "debug",
+                CompileMode::Release => "release",
+            };
+            let artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
+            let mut objs_path = artifact_path.clone();
+            objs_path.push("obj");
+            if let Some(kind) = fs::create_dir_all(&objs_path).err().map(|error| error.kind()) {
+                fail_immediate!(
+                    "Unable to create abs directory structure: {:?}.",
+                    match kind {
+                        IoErrorKind::PermissionDenied => "permission denied".to_string(),
+                        kind => format!("{:?}", kind),
+                    }
+                );
             }
-        }
-    };
-    
-    // Create abs/debug or abs/release, if it doesn't exist already
-    let artifact_subdirectory = match compile_mode {
-        CompileMode::Debug => "debug",
-        CompileMode::Release => "release",
-    };
-    let artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
-    let mut objs_path = artifact_path.clone();
-    objs_path.push("obj");
-    if let Some(kind) = fs::create_dir_all(&objs_path).err().map(|error| error.kind()) {
-        fail_immediate!(
-            "Unable to create abs directory structure: {:?}.",
-            match kind {
-                IoErrorKind::PermissionDenied => "permission denied".to_string(),
-                kind => format!("{:?}", kind),
+            
+            let mut header_paths = Vec::new();
+            let paths = header_and_src_paths(src_dir_path.to_path_buf(), &mut header_paths, src_dir);
+            
+            let newest_header = header_paths.iter().map(|header| {
+                fs::metadata(header).unwrap().last_write_time()
+            }).max().unwrap_or(0u64);
+            let mut obj_paths = Vec::new();
+            let env = Environment::new(
+                Host::Windows,
+                build_options.compile_mode,
+                CxxOptions::default(),
+                &[
+                    r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\ATLMFC\include",
+                    r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\include",
+                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\ucrt",
+                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\shared",
+                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\um",
+                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\winrt",
+                    r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\cppwinrt",
+                ],
+                &[
+                    r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\ATLMFC\lib\x86",
+                    r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\lib\x86",
+                    r"C:\Program Files (x86)\Windows Kits\10\lib\10.0.18362.0\ucrt\x86",
+                    r"C:\Program Files (x86)\Windows Kits\10\lib\10.0.18362.0\um\x86",
+                ],
+                &["_WINDOWS", "WIN32", "UNICODE", "_USE_MATH_DEFINES"],
+                compiler_path,
+                linker_path,
+                src_dir_path,
+                objs_path,
+            );
+        
+            success &= env.compile_directory(&paths, newest_header, &mut obj_paths);
+        
+            check_success!();
+            let lib_paths = &["avrt.lib"];
+            if let Some(error) = env.link(&artifact_path, obj_paths, lib_paths).err() {
+                fail_immediate!("{}", error.message);
             }
-        );
-    }
-    
-    let mut header_paths = Vec::new();
-    let paths = header_and_src_paths(src_dir_path.to_path_buf(), &mut header_paths, src_dir);
-    
-    let newest_header = header_paths.iter().map(|header| {
-        fs::metadata(header).unwrap().last_write_time()
-    }).max().unwrap_or(0u64);
-    let mut obj_paths = Vec::new();
-    let env = Environment::new(
-        Host::Windows,
-        compile_mode,
-        CxxOptions::default(),
-        &[
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\ATLMFC\include",
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\include",
-            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\ucrt",
-            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\shared",
-            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\um",
-            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\winrt",
-            r"C:\Program Files (x86)\Windows Kits\10\include\10.0.18362.0\cppwinrt",
-        ],
-        &[
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\ATLMFC\lib\x86",
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\lib\x86",
-            r"C:\Program Files (x86)\Windows Kits\10\lib\10.0.18362.0\ucrt\x86",
-            r"C:\Program Files (x86)\Windows Kits\10\lib\10.0.18362.0\um\x86",
-        ],
-        &["_WINDOWS", "WIN32", "UNICODE", "_USE_MATH_DEFINES"],
-        compiler_path,
-        linker_path,
-        src_dir_path,
-        objs_path,
-    );
+            println!("Build succeeded.");
+            artifact_path
+        },
+        Subcommand::Clean => {
+            fn _cleaned_successfully() { println!("Cleaned successfully."); }
+            match fs::remove_dir_all("abs") {
+                Ok(()) => _cleaned_successfully(),
+                Err(error) => match error.kind() {
+                    IoErrorKind::NotFound => _cleaned_successfully(),
+                    error => println!("Failed to clean: {:?}.", error),
+                }
+            }
+            return;
+        },
+    };
 
-    success &= env.compile_directory(&paths, newest_header, &mut obj_paths);
-
-    check_success!();
-    let lib_paths = &["avrt.lib"];
-    if let Some(error) = env.link(&artifact_path, obj_paths, lib_paths).err() {
-        fail_immediate!("{}", error.message);
+    if let Subcommand::Run(_) = options.sub_command {
+        artifact_path.push("main.exe");
+        Command::new(artifact_path)
+            .spawn()
+            .unwrap();
     }
-    println!("\nBuild succeeded.");
 }
