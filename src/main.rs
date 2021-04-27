@@ -690,14 +690,15 @@ int main() {{
             (config, toolchain_paths, artifact_path)
         },
         Subcommand::Clean => {
-            fn _cleaned_successfully() { println!("Cleaned successfully."); }
-            match fs::remove_dir_all("abs") {
-                Ok(()) => _cleaned_successfully(),
-                Err(error) => match error.kind() {
-                    IoErrorKind::NotFound => _cleaned_successfully(),
-                    error => println!("Failed to clean: {:?}.", error),
+            for mode in ["debug", "release"].iter() {
+                if let Err(error) = fs::remove_dir_all(Path::new("abs/").join(mode)) {
+                    match error.kind() {
+                        IoErrorKind::NotFound => {},
+                        error => fail_immediate!("Failed to clean: {:?}.", error),
+                    }
                 }
             }
+            println!("Cleaned successfully.");
             return;
         },
         Subcommand::Kill => {
