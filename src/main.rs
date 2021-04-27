@@ -1,16 +1,52 @@
 use std::process::Command;
 use std::path::{Path, PathBuf};
 use std::convert::AsRef;
-use std::fs;
+use std::fs::{self, File};
 use std::ffi::OsStr;
 use std::io::{self, ErrorKind as IoErrorKind};
 use std::os::windows::prelude::*;
 use std::str::FromStr;
+use std::io::{BufReader, Write};
+use std::borrow::Cow;
 
+use serde::{Serialize, Deserialize};
 use clap::Clap;
 
 enum Host {
     Windows,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+enum CxxStandard {
+    #[serde(rename="c++11")]
+    Cxx11,
+    #[serde(rename="c++14")]
+    Cxx14,
+    #[serde(rename="c++17")]
+    Cxx17,
+    #[serde(rename="c++20")]
+    Cxx20,
+}
+
+impl Default for CxxStandard {
+    fn default() -> Self {
+        CxxStandard::Cxx20
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all="snake_case")]
+enum OutputType {
+    GuiApp,
+    ConsoleApp,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProjectConfig {
+    name: String,
+    cxx_options: CxxOptions,
+    output_type: OutputType,
+    link_libraries: Vec<String>,
 }
 
 #[derive(Clap, Clone, Copy)]
@@ -28,13 +64,6 @@ impl FromStr for CompileMode {
             _ => Err("no match"),
         }
     }
-}
-
-enum CxxStandard {
-    Cxx11,
-    Cxx14,
-    Cxx17,
-    Cxx20,
 }
 
 struct Environment {
@@ -61,6 +90,9 @@ struct BuildOptions {
 
 #[derive(Clap)]
 enum Subcommand {
+    Init {
+        project_root: Option<PathBuf>,
+    },
     Build(BuildOptions),
     Run(BuildOptions),
     Debug(BuildOptions),
@@ -79,6 +111,7 @@ impl Environment {
         host: Host,
         compile_mode: CompileMode,
         options: CxxOptions,
+        output_type: OutputType,
         include_paths: impl IntoIterator<Item=impl AsRef<Path>>,
         lib_paths: impl IntoIterator<Item=impl AsRef<Path>>,
         definitions: impl IntoIterator<Item=impl AsRef<str>>,
@@ -128,8 +161,16 @@ impl Environment {
                 let mut flags = vec![
                     "/nologo".to_string(),
                     "/debug".to_string(),
-                    "/subsystem:windows".to_string(),
                 ];
+                flags.push(
+                    format!(
+                        "/SUBSYSTEM:{}",
+                        match output_type {
+                            OutputType::GuiApp => "WINDOWS",
+                            OutputType::ConsoleApp => "CONSOLE",
+                        },
+                    )
+                );
                 for path in lib_paths {
                     flags.push(format!("/LIBPATH:{}", path.as_ref().to_str().unwrap()));
                 }
@@ -170,13 +211,15 @@ impl Environment {
 
     fn link(
         &self,
+        project_name: &str,
         output_path: impl AsRef<Path>,
         obj_paths: impl IntoIterator<Item=impl AsRef<Path>>,
         lib_paths: impl IntoIterator<Item=impl AsRef<Path>>,
     ) -> Result<String, BuildError> {
         let mut args = self.linker_flags.clone();
         let mut output_path = output_path.as_ref().to_owned();
-        output_path.push("main.exe");
+        output_path.push(project_name);
+        output_path.set_extension("exe");
         args.push(format!("/out:{}", output_path.to_str().unwrap().to_string()));
         for path in obj_paths {
             args.push(path.as_ref().to_str().unwrap().to_string());
@@ -286,6 +329,7 @@ fn get_artifact_path(src_path: impl AsRef<Path>, output_dir_path: impl AsRef<Pat
     path
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
 struct CxxOptions {
     rtti: bool,
     standard: CxxStandard,
@@ -435,32 +479,86 @@ impl ToolchainPaths {
 }
 
 fn main() {
+    if !cfg!(target_os = "windows") {
+        panic!("Unsupported host OS: only Windows is supported.");
+    }
+
+    let options = Options::parse();
     let mut success = true;
-    fn _build_failed() -> ! {
-        println!("\nBuild failed.");
-        std::process::exit(1);
+    macro_rules! _task_failed {
+        () => {
+            println!(
+                "\n{} failed.",
+                match options.sub_command {
+                    Subcommand::Init { .. } => "Initialization",
+                    Subcommand::Build(_) | Subcommand::Run(_) | Subcommand::Debug(_) => "Build",
+                    Subcommand::Clean => "Clean",
+                    Subcommand::Kill => "Kill",
+                },
+            );
+            std::process::exit(1);
+        }
     }
     macro_rules! check_success {
         () => {
             if !success {
-                _build_failed();
+                _task_failed!();
             }
         }
     }
     macro_rules! fail_immediate {
-        ($($t:tt)*) => {
+        ($($t:tt)*) => {{
             println!($($t)*);
-            _build_failed();
-        }
+            _task_failed!();
+        }}
     }
+    let (config, toolchain_paths, mut artifact_path) = match &options.sub_command {
+        Subcommand::Init { project_root } => {
+            let project_root: Cow<Path> = project_root.as_ref()
+                .map(|path| Cow::from(path.as_path()))
+                .unwrap_or_else(||
+                    Cow::from(std::env::current_dir().unwrap())
+                );
+            fs::create_dir_all(&project_root)
+                .unwrap_or_else(|error| fail_immediate!("Unable to create project directory: {}.", error));
+            let config_path = project_root.join("abs.json");
+            if config_path.is_file() {
+                fail_immediate!("ABS project already exists.");
+            } else {
+                let config = ProjectConfig {
+                    name: project_root.file_name().unwrap().to_str().unwrap().to_string(),
+                    cxx_options: CxxOptions::default(),
+                    output_type: OutputType::ConsoleApp,
+                    link_libraries: vec![],
+                };
+                let project_file = File::create(&config_path)
+                    .unwrap_or_else(|error| fail_immediate!("Unable to open project file for writing: {}.", error));
+                serde_json::to_writer_pretty(project_file, &config).unwrap();
 
-    if !cfg!(target_os = "windows") {
-        fail_immediate!("Unsupported host OS: only Windows is supported.");
-    }
+                let mut src_path = project_root.join("src");
+                fs::create_dir_all(&src_path).unwrap();
+                src_path.push("main.cpp");
+                let mut file = fs::File::create(&src_path).unwrap();
+                write!(
+                    file,
+r##"#include <stdio.h>
 
-    let options = Options::parse();
-    let (toolchain_paths, mut artifact_path) = match &options.sub_command {
+int main() {{
+    printf("Hello, world!\n");
+}}
+"##
+                ).unwrap();
+                return;
+            }
+        },
         Subcommand::Build(build_options) | Subcommand::Run(build_options) | Subcommand::Debug(build_options) => {
+            let config_file = match File::open("abs.json") {
+                Ok(file) => BufReader::new(file),
+                Err(error) => fail_immediate!("Unable to read project file in current working directory: {}.", error),
+            };
+            let config: ProjectConfig = serde_json::from_reader(config_file)
+                .unwrap_or_else(|error| fail_immediate!("Failed to parse project file: {}", error));
+
             let src_dir_path = Path::new("src");
             let src_dir = match fs::read_dir(src_dir_path) {
                 Ok(src_dir) => src_dir,
@@ -505,7 +603,8 @@ fn main() {
             let env = Environment::new(
                 Host::Windows,
                 build_options.compile_mode,
-                CxxOptions::default(),
+                config.cxx_options,
+                config.output_type,
                 &toolchain_paths.include_paths,
                 &toolchain_paths.lib_paths,
                 &["_WINDOWS", "WIN32", "UNICODE", "_USE_MATH_DEFINES"],
@@ -518,12 +617,11 @@ fn main() {
             success &= env.compile_directory(&paths, newest_header, &mut obj_paths);
         
             check_success!();
-            let lib_paths = &["avrt.lib"];
-            if let Some(error) = env.link(&artifact_path, obj_paths, lib_paths).err() {
+            if let Some(error) = env.link(&config.name, &artifact_path, obj_paths, &config.link_libraries).err() {
                 fail_immediate!("{}", error.message);
             }
             println!("Build succeeded.");
-            (toolchain_paths, artifact_path)
+            (config, toolchain_paths, artifact_path)
         },
         Subcommand::Clean => {
             fn _cleaned_successfully() { println!("Cleaned successfully."); }
@@ -543,17 +641,20 @@ fn main() {
         },
     };
 
-    let exe_name = "main.exe";
     match options.sub_command {
         Subcommand::Run(_) => {
-            artifact_path.push(exe_name);
+            artifact_path.push(&config.name);
+            artifact_path.set_extension("exe");
             Command::new(artifact_path)
                 .spawn()
+                .unwrap()
+                .wait()
                 .unwrap();
         },
         Subcommand::Debug(_) => {
             kill_debugger();
-            artifact_path.push(exe_name);
+            artifact_path.push(&config.name);
+            artifact_path.set_extension("exe");
             Command::new(&toolchain_paths.debugger_path)
                 .args(&["/debugexe".to_string(), artifact_path.to_str().unwrap().to_string()])
                 .spawn()
