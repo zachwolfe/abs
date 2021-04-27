@@ -8,6 +8,7 @@ use std::os::windows::prelude::*;
 use std::str::FromStr;
 use std::io::{BufReader, Write};
 use std::borrow::Cow;
+use std::cmp::Ordering;
 
 use serde::{Serialize, Deserialize};
 use clap::Clap;
@@ -131,6 +132,9 @@ impl Environment {
                     flags.push("/GR".to_string());
                 } else {
                     flags.push("/GR-".to_string());
+                }
+                if options.async_await {
+                    flags.push("/await".to_string());
                 }
                 match options.standard {
                     CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".to_string()),
@@ -332,6 +336,7 @@ fn get_artifact_path(src_path: impl AsRef<Path>, output_dir_path: impl AsRef<Pat
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct CxxOptions {
     rtti: bool,
+    async_await: bool,
     standard: CxxStandard,
 }
 
@@ -339,6 +344,7 @@ impl Default for CxxOptions {
     fn default() -> Self {
         CxxOptions {
             rtti: false,
+            async_await: true,
             standard: CxxStandard::Cxx20,
         }
     }
@@ -356,6 +362,48 @@ struct ToolchainPaths {
     debugger_path: PathBuf,
     include_paths: Vec<PathBuf>,
     lib_paths: Vec<PathBuf>,
+}
+
+fn parse_version<const N: usize>(version: &str) -> Option<[u64; N]> {
+    let mut output = [0; N];
+    let mut i = 0;
+    for component in version.split('.') {
+        if i >= N {
+            return None;
+        }
+        output[i] = component.parse::<u64>().ok()?;
+        i += 1;
+    }
+    if i < N {
+        None
+    } else {
+        Some(output)
+    }
+}
+
+fn newest_version<P: AsRef<Path>, const N: usize>(parent: P) -> Option<PathBuf> {
+    fs::read_dir(parent.as_ref()).unwrap()
+        .filter_map(|entry| {
+            parse_version(entry.unwrap().file_name().to_str().unwrap())
+        }).max_by(|a: &[u64; N], b: &[u64; N]| {
+        for (a, b) in a.iter().zip(b.iter()) {
+            match a.cmp(b) {
+                Ordering::Greater => return Ordering::Greater,
+                Ordering::Less => return Ordering::Less,
+                Ordering::Equal => continue,
+            }
+        }
+        Ordering::Equal
+    }).map(|path| {
+        let mut name = String::new();
+        for (i, num) in path.iter().enumerate() {
+            if i > 0 {
+                name.push('.');
+            }
+            name.extend(num.to_string().chars());
+        }
+        PathBuf::from(name)
+    })
 }
 
 impl ToolchainPaths {
@@ -395,7 +443,7 @@ impl ToolchainPaths {
         path.push("MSVC");
 
         // TODO: error handling
-        path.push(fs::read_dir(&path)?.next().unwrap().unwrap().file_name());
+        path.push(newest_version::<_, 3>(&path).unwrap());
         let version = path.clone();
 
         path.push("bin");
@@ -447,17 +495,18 @@ impl ToolchainPaths {
 
         path.push("Include");
         // TODO: error handling
-        path.push(fs::read_dir(&path)?.next().unwrap().unwrap().file_name());
+        path.push(newest_version::<_, 4>(&path).unwrap());
+        include_paths.push(path.clone());
         for name in &["ucrt", "shared", "um", "winrt", "cppwinrt"] {
             path.push(name);
             include_paths.push(path.clone());
             path.pop();
         }
 
-        let mut path = win10;
+        let mut path = win10.clone();
         path.push("Lib");
         // TODO: error handling
-        path.push(fs::read_dir(&path)?.next().unwrap().unwrap().file_name());
+        path.push(newest_version::<_, 4>(&path).unwrap());
         for name in &["ucrt", "um"] {
             path.push(name);
             path.push("x64");
