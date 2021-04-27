@@ -362,6 +362,9 @@ struct ToolchainPaths {
     debugger_path: PathBuf,
     include_paths: Vec<PathBuf>,
     lib_paths: Vec<PathBuf>,
+
+    cppwinrt_path: PathBuf,
+    midl_path: PathBuf,
 }
 
 fn parse_version<const N: usize>(version: &str) -> Option<[u64; N]> {
@@ -515,6 +518,17 @@ impl ToolchainPaths {
             path.pop();
         }
 
+        let mut path = win10;
+        path.push("bin");
+        // TODO: error handling
+        path.push(newest_version::<_, 4>(&path).unwrap());
+        path.push("x64");
+        let x64 = path.clone();
+        path.push("cppwinrt.exe");
+        let cppwinrt_path = x64;
+        path.push("midl.exe");
+        let midl_path = path;
+
         Ok(
             ToolchainPaths {
                 compiler_path,
@@ -522,6 +536,9 @@ impl ToolchainPaths {
                 debugger_path,
                 include_paths,
                 lib_paths,
+
+                cppwinrt_path,
+                midl_path,
             }
         )
     }
