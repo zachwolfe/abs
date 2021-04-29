@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::cmp::Ordering;
 use std::process::Command;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::os::windows::prelude::*;
 
 use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
@@ -22,8 +22,8 @@ pub struct ToolchainPaths {
 }
 
 pub struct BuildEnvironment {
-    compiler_flags: Vec<String>,
-    linker_flags: Vec<String>,
+    compiler_flags: Vec<OsString>,
+    linker_flags: Vec<OsString>,
     compiler_path: PathBuf,
     linker_path: PathBuf,
 
@@ -82,6 +82,12 @@ impl SrcPaths {
     }
 }
 
+fn cmd_flag(flag: impl AsRef<OsStr>, argument: impl AsRef<OsStr>) -> OsString {
+    let mut string = flag.as_ref().to_owned();
+    string.push(argument);
+    string
+}
+
 impl BuildEnvironment {
     pub fn new<'a>(
         host: Host,
@@ -96,49 +102,49 @@ impl BuildEnvironment {
     ) -> Self {
         let compiler_flags = match host {
             Host::Windows => {
-                let mut flags = vec![
-                    "/W3".to_string(),
-                    "/Zi".to_string(),
-                    "/EHsc".to_string(),
-                    "/c".to_string()
+                let mut flags: Vec<OsString> = vec![
+                    "/W3".into(),
+                    "/Zi".into(),
+                    "/EHsc".into(),
+                    "/c".into(),
                 ];
                 if config.cxx_options.rtti {
-                    flags.push("/GR".to_string());
+                    flags.push("/GR".into());
                 } else {
-                    flags.push("/GR-".to_string());
+                    flags.push("/GR-".into());
                 }
                 if config.cxx_options.async_await {
-                    flags.push("/await".to_string());
+                    flags.push("/await".into());
                 }
                 match config.cxx_options.standard {
-                    CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".to_string()),
-                    CxxStandard::Cxx17 => flags.push("/std:c++17".to_string()),
-                    CxxStandard::Cxx20 => flags.push("/std:c++latest".to_string()),
+                    CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".into()),
+                    CxxStandard::Cxx17 => flags.push("/std:c++17".into()),
+                    CxxStandard::Cxx20 => flags.push("/std:c++latest".into()),
                 }
                 match build_options.compile_mode {
                     CompileMode::Debug => {
-                        flags.push("/MDd".to_string());
-                        flags.push("/RTC1".to_string());
+                        flags.push("/MDd".into());
+                        flags.push("/RTC1".into());
                     },
                     CompileMode::Release => {
-                        flags.push("/O2".to_string());
+                        flags.push("/O2".into());
                     },
                 }
                 for definition in definitions {
-                    flags.push(format!("/D{}={}", definition[0].as_ref(), definition[1].as_ref()));
+                    flags.push(format!("/D{}={}", definition[0].as_ref(), definition[1].as_ref()).into());
                 }
                 for path in include_paths {
-                    flags.push("/I".to_string());
-                    flags.push(path.as_ref().to_str().unwrap().to_string());
+                    flags.push("/I".into());
+                    flags.push(path.as_ref().as_os_str().to_owned());
                 }
                 flags
             },
         };
         let linker_flags = match host {
             Host::Windows => {
-                let mut flags = vec![
-                    "/nologo".to_string(),
-                    "/debug".to_string(),
+                let mut flags: Vec<OsString> = vec![
+                    "/nologo".into(),
+                    "/debug".into(),
                 ];
                 flags.push(
                     format!(
@@ -147,10 +153,10 @@ impl BuildEnvironment {
                             OutputType::GuiApp => "WINDOWS",
                             OutputType::ConsoleApp => "CONSOLE",
                         },
-                    )
+                    ).into()
                 );
                 for path in lib_paths {
-                    flags.push(format!("/LIBPATH:{}", path.as_ref().to_str().unwrap()));
+                    flags.push(cmd_flag("/LIBPATH:", path.as_ref()));
                 }
                 flags
             }
@@ -243,9 +249,20 @@ impl BuildEnvironment {
     fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>) -> Result<String, BuildError> {
         let mut args = self.compiler_flags.clone();
         let path = path.as_ref();
-        args.push(format!(r"/Fo{}", self.get_artifact_path(path, &obj_path, "obj").to_str().unwrap()));
-        args.push(format!(r"/Fd{}", self.get_artifact_path(path, &obj_path, "pdb").to_str().unwrap()));
-        args.push(path.to_str().unwrap().to_string());
+
+        args.push(
+            cmd_flag(
+                "/Fo",
+                self.get_artifact_path(path, &obj_path, "obj")
+            )
+        );
+        args.push(
+            cmd_flag(
+                "/Fd",
+                self.get_artifact_path(path, &obj_path, "pdb")
+            )
+        );
+        args.push(path.as_os_str().to_owned());
         let output = Command::new(&self.compiler_path)
             .args(&args)
             .output()
@@ -272,12 +289,17 @@ impl BuildEnvironment {
         let mut output_path = output_path.as_ref().to_owned();
         output_path.push(project_name);
         output_path.set_extension("exe");
-        args.push(format!("/out:{}", output_path.to_str().unwrap().to_string()));
+        args.push(
+            cmd_flag(
+                "/out:{}",
+                output_path,
+            )
+        );
         for path in obj_paths {
-            args.push(path.as_ref().to_str().unwrap().to_string());
+            args.push(path.as_ref().as_os_str().to_owned());
         }
         for path in lib_paths {
-            args.push(path.as_ref().to_str().unwrap().to_string());
+            args.push(path.as_ref().as_os_str().to_owned());
         }
         let output = Command::new(&self.linker_path)
             .args(&args)
@@ -323,8 +345,9 @@ fn find_nuget_package(name: &str, packages_path: impl AsRef<Path>) -> Option<Pat
         .find(|path|
             path.file_name()
                 .unwrap()
-                .to_str().unwrap()
-                .starts_with(name)
+                .to_str()
+                .map(|file_name| file_name.starts_with(name))
+                .unwrap_or(false)
         )
 }
 
@@ -342,10 +365,10 @@ fn download_nuget_deps(deps: &[&str]) -> Vec<PathBuf> {
         let status = Command::new(nuget_path)
             .args(
                 &[
-                    "install",
-                    "-OutputDirectory",
-                    nuget_path.parent().unwrap().to_str().unwrap(),
-                    dep,
+                    "install".into(),
+                    "-OutputDirectory".into(),
+                    nuget_path.parent().unwrap().to_owned(),
+                    dep.into(),
                 ]
             )
                 .spawn()
@@ -378,7 +401,8 @@ fn parse_version<const N: usize>(version: &str) -> Option<[u64; N]> {
 fn newest_version<P: AsRef<Path>, const N: usize>(parent: P) -> Option<PathBuf> {
     fs::read_dir(parent.as_ref()).unwrap()
         .filter_map(|entry| {
-            parse_version(entry.unwrap().file_name().to_str().unwrap())
+            entry.unwrap().file_name().to_str()
+                .and_then(parse_version)
         }).max_by(|a: &[u64; N], b: &[u64; N]| {
         for (a, b) in a.iter().zip(b.iter()) {
             match a.cmp(b) {
@@ -414,29 +438,20 @@ impl ToolchainPaths {
         let program_files = path.clone();
         path.push("Microsoft Visual Studio");
         let year = fs::read_dir(&path)?.filter_map(|entry| {
-            if let Ok(entry) = entry {
-                if let Ok(file_type) = entry.file_type() {
-                    let name = entry.path().file_name().unwrap().to_str().unwrap().to_string();
-                    if let Ok(number) = name.parse::<u16>() {
-                        if file_type.is_dir() {
-                            Some((name, number))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            entry.ok()
+                .filter(|entry| 
+                    entry.file_type().ok()
+                        .map(|file| file.is_dir())
+                        .unwrap_or(false)
+                )
+                .and_then(|entry|
+                    entry.path().file_name().unwrap().to_str()
+                        .and_then(|file_name| file_name.parse::<u16>().ok())
+                )
         })
-            .max_by_key(|&(ref _name, year)| year)
-            .map(|(name, _year)| name)
+            .max()
             .unwrap();
-        path.push(year);
+        path.push(year.to_string());
         // TODO: principled way of choosing edition
         path.push("Preview");
         let edition = path.clone();

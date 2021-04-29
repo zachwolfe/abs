@@ -5,6 +5,7 @@ use std::io::ErrorKind as IoErrorKind;
 use std::io::{BufReader, Write};
 use std::borrow::Cow;
 use std::iter;
+use std::ffi::OsStr;
 
 use clap::Clap;
 
@@ -71,7 +72,9 @@ fn main() {
                 fail_immediate!("ABS project already exists.");
             } else {
                 let config = ProjectConfig {
-                    name: project_root.file_name().unwrap().to_str().unwrap().to_string(),
+                    name: project_root.file_name().unwrap()
+                        .to_str().expect("Project name must be representable in UTF-8")
+                        .to_string(),
                     cxx_options: CxxOptions::default(),
                     output_type: OutputType::ConsoleApp,
                     link_libraries: vec![],
@@ -118,13 +121,13 @@ int main() {{
 
             println!("Finding toolchain paths...");
             let toolchain_paths = ToolchainPaths::find().unwrap();
-            let cppwinrt = |winmd_path: &str, reference: bool| {
-                let mut args = vec![
-                    "-input", winmd_path,
-                    "-output", "yoyoma",
+            let cppwinrt = |winmd_path: &OsStr, reference: bool| {
+                let mut args: Vec<&OsStr> = vec![
+                    OsStr::new("-input"), winmd_path,
+                    OsStr::new("-output"), OsStr::new("yoyoma"),
                 ];
                 if reference {
-                    args.extend(&["-reference", "local"]);
+                    args.extend(&[OsStr::new("-reference"), OsStr::new("local")]);
                 }
                 let code = Command::new(&toolchain_paths.cppwinrt_path)
                     .args(args)
@@ -135,10 +138,10 @@ int main() {{
                 assert!(code.success());
             };
             // Generate sdk headers
-            cppwinrt("sdk", false);
+            cppwinrt(OsStr::new("sdk"), false);
             // Generate the rest of the headers
             for winmd_path in &toolchain_paths.winmd_paths {
-                cppwinrt(winmd_path.to_str().unwrap(), true)
+                cppwinrt(winmd_path.as_os_str(), true)
             }
             
             // Create abs/debug or abs/release, if it doesn't exist already
@@ -218,7 +221,7 @@ int main() {{
             artifact_path.push(&config.name);
             artifact_path.set_extension("exe");
             Command::new(&toolchain_paths.debugger_path)
-                .args(&["/debugexe".to_string(), artifact_path.to_str().unwrap().to_string()])
+                .args(&[OsStr::new("/debugexe"), artifact_path.as_os_str()])
                 .spawn()
                 .unwrap();
         },
