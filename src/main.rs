@@ -9,6 +9,7 @@ use std::str::FromStr;
 use std::io::{BufReader, Write};
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::iter;
 
 use serde::{Serialize, Deserialize};
 use clap::Clap;
@@ -108,14 +109,14 @@ struct Options {
 }
 
 impl Environment {
-    fn new(
+    fn new<'a>(
         host: Host,
         compile_mode: CompileMode,
         options: CxxOptions,
         output_type: OutputType,
         include_paths: impl IntoIterator<Item=impl AsRef<Path>>,
         lib_paths: impl IntoIterator<Item=impl AsRef<Path>>,
-        definitions: impl IntoIterator<Item=impl AsRef<str>>,
+        definitions: impl IntoIterator<Item=&'a [impl AsRef<str> + 'a; 2]>,
         compiler_path: impl Into<PathBuf>, linker_path: impl Into<PathBuf>,
         src_dir_path: impl Into<PathBuf>,
         objs_path: impl Into<PathBuf>,
@@ -151,7 +152,7 @@ impl Environment {
                     },
                 }
                 for definition in definitions {
-                    flags.push(format!("/D{}", definition.as_ref()));
+                    flags.push(format!("/D{}={}", definition[0].as_ref(), definition[1].as_ref()));
                 }
                 for path in include_paths {
                     flags.push("/I".to_string());
@@ -365,6 +366,7 @@ struct ToolchainPaths {
 
     cppwinrt_path: PathBuf,
     midl_path: PathBuf,
+    winmd_paths: Vec<PathBuf>,
 }
 
 fn parse_version<const N: usize>(version: &str) -> Option<[u64; N]> {
@@ -411,6 +413,14 @@ fn newest_version<P: AsRef<Path>, const N: usize>(parent: P) -> Option<PathBuf> 
 
 impl ToolchainPaths {
     fn find() -> io::Result<ToolchainPaths> {
+        let dependency_paths = download_nuget_deps(&["Microsoft.Windows.CppWinRT", "Microsoft.ProjectReunion", "Microsoft.ProjectReunion.WinUI", "Microsoft.ProjectReunion.Foundation"]);
+        let mut winmd_paths = Vec::new();
+        for md_path in &dependency_paths[2..3] {
+            winmd_paths.push(md_path.join(r"lib\uap10.0"));
+        }
+
+        let cppwinrt_path = dependency_paths[0].join(r"bin\cppwinrt.exe");
+
         let mut path = PathBuf::from(r"C:\Program Files (x86)");
         let program_files = path.clone();
         path.push("Microsoft Visual Studio");
@@ -438,8 +448,9 @@ impl ToolchainPaths {
             .map(|(name, _year)| name)
             .unwrap();
         path.push(year);
-        path.push("Community");
-        let community = path.clone();
+        // TODO: principled way of choosing edition
+        path.push("Preview");
+        let edition = path.clone();
 
         path.push("VC");
         path.push("Tools");
@@ -484,8 +495,7 @@ impl ToolchainPaths {
         path.push("x64");
         lib_paths.push(path);
 
-        let mut path = community;
-        path.push("Community");
+        let mut path = edition;
         path.push("Common7");
         path.push("IDE");
         path.push("devenv.exe");
@@ -500,7 +510,7 @@ impl ToolchainPaths {
         // TODO: error handling
         path.push(newest_version::<_, 4>(&path).unwrap());
         include_paths.push(path.clone());
-        for name in &["ucrt", "shared", "um", "winrt", "cppwinrt"] {
+        for name in &["ucrt", "shared", "um", "winrt"] {
             path.push(name);
             include_paths.push(path.clone());
             path.pop();
@@ -523,9 +533,6 @@ impl ToolchainPaths {
         // TODO: error handling
         path.push(newest_version::<_, 4>(&path).unwrap());
         path.push("x64");
-        let x64 = path.clone();
-        path.push("cppwinrt.exe");
-        let cppwinrt_path = x64;
         path.push("midl.exe");
         let midl_path = path;
 
@@ -539,9 +546,73 @@ impl ToolchainPaths {
 
                 cppwinrt_path,
                 midl_path,
+                winmd_paths,
             }
         )
     }
+}
+
+fn get_nuget_path() -> &'static Path {
+    let path = Path::new(r"abs\vs\nuget.exe");
+    if path.is_file() {
+        println!("Found nuget.");
+        return path;
+    }
+
+    // Otherwise download it off of the internet :(
+    print!("Downloading nuget off of the internet...");
+    io::stdout().flush().unwrap();
+    let mut resp = reqwest::blocking::get("https://dist.nuget.org/win-x86-commandline/latest/nuget.exe").unwrap();
+    assert!(resp.status().is_success());
+    
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut output = File::create(path).unwrap();
+    resp.copy_to(&mut output).unwrap();
+    println!("complete.");
+
+    path
+}
+
+fn find_nuget_package(name: &str, packages_path: impl AsRef<Path>) -> Option<PathBuf> {
+    fs::read_dir(packages_path.as_ref()).unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path|
+            path.file_name()
+                .unwrap()
+                .to_str().unwrap()
+                .starts_with(name)
+        )
+}
+
+fn download_nuget_deps(deps: &[&str]) -> Vec<PathBuf> {
+    let nuget_path = get_nuget_path();
+    let packages_path = nuget_path.parent().unwrap();
+    let mut paths = Vec::new();
+    for &dep in deps {
+        if let Some(existing) = find_nuget_package(dep, packages_path) {
+            println!("Found {}.", dep);
+            paths.push(existing.clone());
+            continue;
+        }
+        println!("Installing {}...", dep);
+        let status = Command::new(nuget_path)
+            .args(
+                &[
+                    "install",
+                    "-OutputDirectory",
+                    nuget_path.parent().unwrap().to_str().unwrap(),
+                    dep,
+                ]
+            )
+                .spawn()
+                .unwrap()
+                .wait()
+                .unwrap();
+        assert!(status.success());
+        paths.push(find_nuget_package(dep, packages_path).unwrap());
+    }
+    paths
 }
 
 fn main() {
@@ -637,9 +708,30 @@ int main() {{
                 }
             };
 
-            print!("Finding toolchain paths...");
+            println!("Finding toolchain paths...");
             let toolchain_paths = ToolchainPaths::find().unwrap();
-            println!("complete.");
+            let cppwinrt = |winmd_path: &str, reference: bool| {
+                let mut args = vec![
+                    "-input", winmd_path,
+                    "-output", "yoyoma",
+                ];
+                if reference {
+                    args.extend(&["-reference", "local"]);
+                }
+                let code = Command::new(&toolchain_paths.cppwinrt_path)
+                    .args(args)
+                    .spawn()
+                    .unwrap()
+                    .wait()
+                    .unwrap();
+                assert!(code.success());
+            };
+            // Generate sdk headers
+            cppwinrt("sdk", false);
+            // Generate the rest of the headers
+            for winmd_path in &toolchain_paths.winmd_paths {
+                cppwinrt(winmd_path.to_str().unwrap(), true)
+            }
             
             // Create abs/debug or abs/release, if it doesn't exist already
             let artifact_subdirectory = match build_options.compile_mode {
@@ -671,9 +763,11 @@ int main() {{
                 build_options.compile_mode,
                 config.cxx_options,
                 config.output_type,
-                &toolchain_paths.include_paths,
+                toolchain_paths.include_paths.iter()
+                    .map(|path| path.as_ref())
+                    .chain(iter::once(Path::new("yoyoma"))),
                 &toolchain_paths.lib_paths,
-                &["_WINDOWS", "WIN32", "UNICODE", "_USE_MATH_DEFINES"],
+                &[["_WINDOWS", ""], ["WIN32", ""], ["UNICODE", ""], ["_USE_MATH_DEFINES", ""], /*["CPPWINRT_VERSION", "2.0.210403.2"]*/],
                 &toolchain_paths.compiler_path,
                 &toolchain_paths.linker_path,
                 src_dir_path,
