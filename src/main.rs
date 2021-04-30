@@ -5,7 +5,7 @@ use std::io::ErrorKind as IoErrorKind;
 use std::io::{BufReader, Write};
 use std::borrow::Cow;
 use std::iter;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 
 use clap::Clap;
 
@@ -119,8 +119,67 @@ int main() {{
                 }
             };
 
-            println!("Finding toolchain paths...");
+            print!("Finding toolchain paths...");
             let toolchain_paths = ToolchainPaths::find().unwrap();
+            println!("done.");
+
+            let mut midlrt_args = vec![
+                "/winrt".into(),
+                "/metadata_dir".into(),
+                toolchain_paths.foundation_contract_path.as_os_str().to_os_string(),
+                "/W1".into(),
+                "/nologo".into(),
+                "/char".into(),
+                "signed".into(),
+                "/env".into(),
+                "win32".into(),
+                "/h".into(),
+                "nul".into(),
+                "/dlldata".into(),
+                "nul".into(),
+                "/iid".into(),
+                "nul".into(),
+                "/proxy".into(),
+                "nul".into(),
+                "/notlb".into(),
+                "/client".into(),
+                "none".into(),
+                "/server".into(),
+                "none".into(),
+                "/enum_class".into(),
+                "/ns_prefix".into(),
+                "/target".into(),
+                "NT60".into(),
+                "/nomidl".into(),
+            ];
+            for winmd_path in &toolchain_paths.winmd_paths {
+                for entry in fs::read_dir(winmd_path).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.extension() == Some(OsStr::new("winmd")) {
+                        midlrt_args.push(OsString::from("/reference"));
+                        midlrt_args.push(path.as_os_str().to_owned());
+                    }
+                }
+            }
+            for include_path in &toolchain_paths.include_paths {
+                midlrt_args.push(OsString::from("/I"));
+                midlrt_args.push(include_path.as_os_str().to_owned());
+            }
+
+            for idl_path in &paths.idl_paths {
+                let code = Command::new(&toolchain_paths.midlrt_path)
+                    .args(
+                        midlrt_args.iter().cloned().chain(iter::once(idl_path.as_os_str().to_owned()))
+                    )
+                    .env("PATH", toolchain_paths.compiler_path.parent().unwrap())
+                    .spawn()
+                    .unwrap()
+                    .wait()
+                    .unwrap();
+
+                assert!(code.success());
+            }
+
             let cppwinrt = |winmd_path: &OsStr, reference: bool| {
                 let mut args: Vec<&OsStr> = vec![
                     OsStr::new("-input"), winmd_path,

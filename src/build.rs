@@ -15,6 +15,7 @@ pub struct ToolchainPaths {
     pub debugger_path: PathBuf,
     pub include_paths: Vec<PathBuf>,
     pub lib_paths: Vec<PathBuf>,
+    pub foundation_contract_path: PathBuf,
 
     pub cppwinrt_path: PathBuf,
     pub midlrt_path: PathBuf,
@@ -428,7 +429,9 @@ impl ToolchainPaths {
     pub fn find() -> io::Result<ToolchainPaths> {
         let dependency_paths = download_nuget_deps(&["Microsoft.Windows.CppWinRT", "Microsoft.ProjectReunion", "Microsoft.ProjectReunion.WinUI", "Microsoft.ProjectReunion.Foundation"]);
         let mut winmd_paths = Vec::new();
+        let mut include_paths = Vec::new();
         for md_path in &dependency_paths[2..3] {
+            include_paths.push(md_path.join("include"));
             winmd_paths.push(md_path.join(r"lib\uap10.0"));
         }
 
@@ -476,7 +479,6 @@ impl ToolchainPaths {
         path.push("link.exe");
         let linker_path = path;
 
-        let mut include_paths = Vec::new();
         let mut lib_paths = Vec::new();
         let mut path = version.clone();
         path.push("ATLMFC");
@@ -532,12 +534,38 @@ impl ToolchainPaths {
             path.pop();
         }
 
+        let mut path = win10.clone();
+        path.push("References");
+        path.push(newest_version::<_, 4>(&path).unwrap());
+        let mut foundation_contract_path = None;
+        for entry in fs::read_dir(&path).unwrap() {
+            let entry = entry.unwrap();
+            if !entry.file_type().unwrap().is_dir() { continue; }
+
+            let mut path = entry.path();
+            let name = path.file_name().unwrap().to_os_string();
+            let is_foundation_contract = name.to_str()
+                .filter(|name| name.to_ascii_lowercase() == "windows.foundation.foundationcontract")
+                .is_some();
+            if is_foundation_contract {
+                path.push(newest_version::<_, 4>(&path).unwrap());
+                foundation_contract_path = Some(path);
+                break;
+            }
+        }
+        let foundation_contract_path = foundation_contract_path.unwrap();
+
+        let mut path = win10.clone();
+        path.push("UnionMetadata");
+        path.push(newest_version::<_, 4>(&path).unwrap());
+        winmd_paths.push(path.clone());
+
         let mut path = win10;
         path.push("bin");
         // TODO: error handling
         path.push(newest_version::<_, 4>(&path).unwrap());
         path.push("x64");
-        path.push("midlrt.exe");
+        path.push("midl.exe");
         let midlrt_path = path;
 
         Ok(
@@ -547,6 +575,7 @@ impl ToolchainPaths {
                 debugger_path,
                 include_paths,
                 lib_paths,
+                foundation_contract_path,
 
                 cppwinrt_path,
                 midlrt_path,
