@@ -4,8 +4,7 @@ use std::fs::{self, File};
 use std::io::ErrorKind as IoErrorKind;
 use std::io::{BufReader, Write};
 use std::borrow::Cow;
-use std::iter;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 
 use clap::Clap;
 
@@ -122,86 +121,6 @@ int main() {{
             print!("Finding toolchain paths...");
             let toolchain_paths = ToolchainPaths::find().unwrap();
             println!("done.");
-
-            let mut midlrt_args = vec![
-                "/winrt".into(),
-                "/metadata_dir".into(),
-                toolchain_paths.foundation_contract_path.as_os_str().to_os_string(),
-                "/W1".into(),
-                "/nologo".into(),
-                "/char".into(),
-                "signed".into(),
-                "/env".into(),
-                "win32".into(),
-                "/h".into(),
-                "nul".into(),
-                "/dlldata".into(),
-                "nul".into(),
-                "/iid".into(),
-                "nul".into(),
-                "/proxy".into(),
-                "nul".into(),
-                "/notlb".into(),
-                "/client".into(),
-                "none".into(),
-                "/server".into(),
-                "none".into(),
-                "/enum_class".into(),
-                "/ns_prefix".into(),
-                "/target".into(),
-                "NT60".into(),
-                "/nomidl".into(),
-            ];
-            for winmd_path in &toolchain_paths.winmd_paths {
-                for entry in fs::read_dir(winmd_path).unwrap() {
-                    let path = entry.unwrap().path();
-                    if path.extension() == Some(OsStr::new("winmd")) {
-                        midlrt_args.push(OsString::from("/reference"));
-                        midlrt_args.push(path.as_os_str().to_owned());
-                    }
-                }
-            }
-            for include_path in &toolchain_paths.include_paths {
-                midlrt_args.push(OsString::from("/I"));
-                midlrt_args.push(include_path.as_os_str().to_owned());
-            }
-
-            for idl_path in &paths.idl_paths {
-                let code = Command::new(&toolchain_paths.midlrt_path)
-                    .args(
-                        midlrt_args.iter().cloned().chain(iter::once(idl_path.as_os_str().to_owned()))
-                    )
-                    .env("PATH", toolchain_paths.compiler_path.parent().unwrap())
-                    .spawn()
-                    .unwrap()
-                    .wait()
-                    .unwrap();
-
-                assert!(code.success());
-            }
-
-            let cppwinrt = |winmd_path: &OsStr, reference: bool| {
-                let mut args: Vec<&OsStr> = vec![
-                    OsStr::new("-input"), winmd_path,
-                    OsStr::new("-output"), OsStr::new("yoyoma"),
-                ];
-                if reference {
-                    args.extend(&[OsStr::new("-reference"), OsStr::new("local")]);
-                }
-                let code = Command::new(&toolchain_paths.cppwinrt_path)
-                    .args(args)
-                    .spawn()
-                    .unwrap()
-                    .wait()
-                    .unwrap();
-                assert!(code.success());
-            };
-            // Generate sdk headers
-            cppwinrt(OsStr::new("sdk"), false);
-            // Generate the rest of the headers
-            for winmd_path in &toolchain_paths.winmd_paths {
-                cppwinrt(winmd_path.as_os_str(), true)
-            }
             
             // Create abs/debug or abs/release, if it doesn't exist already
             let artifact_subdirectory = match build_options.compile_mode {
@@ -209,11 +128,21 @@ int main() {{
                 CompileMode::Release => "release",
             };
             let artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
-            let mut objs_path = artifact_path.clone();
-            objs_path.push("obj");
+            let objs_path = artifact_path.join("obj");
             if let Some(kind) = fs::create_dir_all(&objs_path).err().map(|error| error.kind()) {
                 fail_immediate!(
                     "Unable to create abs directory structure: {:?}.",
+                    match kind {
+                        IoErrorKind::PermissionDenied => "permission denied".to_string(),
+                        kind => format!("{:?}", kind),
+                    }
+                );
+            }
+
+            let local_winmds_path = artifact_path.join("winmd");
+            if let Some(kind) = fs::create_dir_all(&local_winmds_path).err().map(|error| error.kind()) {
+                fail_immediate!(
+                    "Unable to create winmd directory structure: {:?}.",
                     match kind {
                         IoErrorKind::PermissionDenied => "permission denied".to_string(),
                         kind => format!("{:?}", kind),
@@ -226,16 +155,15 @@ int main() {{
                 Host::Windows,
                 &config,
                 &build_options,
-                toolchain_paths.include_paths.iter()
-                    .map(|path| path.as_ref())
-                    .chain(iter::once(Path::new("yoyoma"))),
-                &toolchain_paths.lib_paths,
+                &toolchain_paths,
                 &[["_WINDOWS", ""], ["WIN32", ""], ["UNICODE", ""], ["_USE_MATH_DEFINES", ""]],
-                &toolchain_paths.compiler_path,
-                &toolchain_paths.linker_path,
                 src_dir_path,
                 objs_path,
+                local_winmds_path,
             );
+
+            env.compile_idl_directory(&paths);
+            env.project_winsdk();
         
             success &= env.compile_directory(&paths, &header_paths, &mut obj_paths);
         

@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::process::Command;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::prelude::*;
+use std::iter;
 
 use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
@@ -18,18 +19,19 @@ pub struct ToolchainPaths {
     pub foundation_contract_path: PathBuf,
 
     pub cppwinrt_path: PathBuf,
-    pub midlrt_path: PathBuf,
+    pub midl_path: PathBuf,
     pub winmd_paths: Vec<PathBuf>,
 }
 
-pub struct BuildEnvironment {
+pub struct BuildEnvironment<'a> {
     compiler_flags: Vec<OsString>,
     linker_flags: Vec<OsString>,
-    compiler_path: PathBuf,
-    linker_path: PathBuf,
+    midl_flags: Vec<OsString>,
 
+    toolchain_paths: &'a ToolchainPaths,
     src_dir_path: PathBuf,
     objs_path: PathBuf,
+    local_winmds_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -89,17 +91,16 @@ fn cmd_flag(flag: impl AsRef<OsStr>, argument: impl AsRef<OsStr>) -> OsString {
     string
 }
 
-impl BuildEnvironment {
-    pub fn new<'a>(
+impl<'a> BuildEnvironment<'a> {
+    pub fn new<'b>(
         host: Host,
         config: &ProjectConfig,
         build_options: &BuildOptions,
-        include_paths: impl IntoIterator<Item=impl AsRef<Path>>,
-        lib_paths: impl IntoIterator<Item=impl AsRef<Path>>,
-        definitions: impl IntoIterator<Item=&'a [impl AsRef<str> + 'a; 2]>,
-        compiler_path: impl Into<PathBuf>, linker_path: impl Into<PathBuf>,
+        toolchain_paths: &'a ToolchainPaths,
+        definitions: impl IntoIterator<Item=&'b [impl AsRef<str> + 'b; 2]>,
         src_dir_path: impl Into<PathBuf>,
         objs_path: impl Into<PathBuf>,
+        local_winmds_path: impl Into<PathBuf>,
     ) -> Self {
         let compiler_flags = match host {
             Host::Windows => {
@@ -134,9 +135,9 @@ impl BuildEnvironment {
                 for definition in definitions {
                     flags.push(format!("/D{}={}", definition[0].as_ref(), definition[1].as_ref()).into());
                 }
-                for path in include_paths {
+                for path in &toolchain_paths.include_paths {
                     flags.push("/I".into());
-                    flags.push(path.as_ref().as_os_str().to_owned());
+                    flags.push(path.as_os_str().to_owned());
                 }
                 flags
             },
@@ -156,19 +157,68 @@ impl BuildEnvironment {
                         },
                     ).into()
                 );
-                for path in lib_paths {
-                    flags.push(cmd_flag("/LIBPATH:", path.as_ref()));
+                for path in &toolchain_paths.lib_paths {
+                    flags.push(cmd_flag("/LIBPATH:", path));
                 }
                 flags
             }
         };
+        let midl_flags = match host {
+            Host::Windows => {
+                let mut flags = vec![
+                    "/winrt".into(),
+                    "/metadata_dir".into(),
+                    toolchain_paths.foundation_contract_path.as_os_str().to_os_string(),
+                    "/W1".into(),
+                    "/nologo".into(),
+                    "/char".into(),
+                    "signed".into(),
+                    "/env".into(),
+                    "win32".into(),
+                    "/h".into(),
+                    "nul".into(),
+                    "/dlldata".into(),
+                    "nul".into(),
+                    "/iid".into(),
+                    "nul".into(),
+                    "/proxy".into(),
+                    "nul".into(),
+                    "/notlb".into(),
+                    "/client".into(),
+                    "none".into(),
+                    "/server".into(),
+                    "none".into(),
+                    "/enum_class".into(),
+                    "/ns_prefix".into(),
+                    "/target".into(),
+                    "NT60".into(),
+                    "/nomidl".into(),
+                ];
+                for winmd_path in &toolchain_paths.winmd_paths {
+                    for entry in fs::read_dir(winmd_path).unwrap() {
+                        let path = entry.unwrap().path();
+                        if path.extension() == Some(OsStr::new("winmd")) {
+                            flags.push(OsString::from("/reference"));
+                            flags.push(path.as_os_str().to_owned());
+                        }
+                    }
+                }
+                for include_path in &toolchain_paths.include_paths {
+                    flags.push(OsString::from("/I"));
+                    flags.push(include_path.as_os_str().to_owned());
+                }
+                flags
+            },
+        };
         BuildEnvironment {
             compiler_flags,
             linker_flags,
-            compiler_path: compiler_path.into(),
-            linker_path: linker_path.into(),
+            midl_flags,
+
+            toolchain_paths,
             src_dir_path: src_dir_path.into(),
             objs_path: objs_path.into(),
+            local_winmds_path: local_winmds_path.into(),
         }
     }
 
@@ -183,6 +233,87 @@ impl BuildEnvironment {
         let succ = path.set_extension(extension);
         assert!(succ);
         path
+    }
+
+    fn compile_idl(&self, path: impl AsRef<Path>, winmd_path: impl AsRef<Path>) {
+        let mut flags = self.midl_flags.clone();
+        flags.push("/winmd".into());
+        flags.push(winmd_path.as_ref().as_os_str().to_os_string());
+        flags.push(path.as_ref().as_os_str().to_owned());
+        let code = Command::new(&self.toolchain_paths.midl_path)
+            .args(flags)
+            .env("PATH", self.toolchain_paths.compiler_path.parent().unwrap())
+            .spawn()
+            .unwrap()
+            .wait()
+            .unwrap();
+
+        assert!(code.success());
+    }
+
+    pub fn compile_idl_directory(&self, paths: &SrcPaths) {
+        fs::create_dir_all("generated_sources").unwrap();
+        for idl_path in &paths.idl_paths {
+            let winmd_path = self.get_artifact_path(idl_path, &self.local_winmds_path, "winmd");
+            self.compile_idl(idl_path, &winmd_path);
+            let references = self.toolchain_paths.winmd_paths.iter().cloned()
+                .chain(iter::once(PathBuf::from("local")));
+
+            
+            let mut args = vec![
+                OsString::from("-input"), winmd_path.as_os_str().to_owned(),
+                OsString::from("-output"), OsString::from("."),
+                OsString::from("-component"), OsString::from("generated_sources"),
+                OsString::from("-name"), OsString::from("WinUITest"),
+                OsString::from("-prefix"),
+                OsString::from("-overwrite"),
+                OsString::from("-optimize"),
+            ];
+            for reference in references {
+                args.push("-reference".into());
+                args.push(reference.as_os_str().to_owned());
+            }
+            self.cppwinrt(args);
+        }
+
+        for child in &paths.children {
+            self.compile_idl_directory(child);
+        }
+    }
+
+    fn cppwinrt(&self, args: impl IntoIterator<Item=impl AsRef<OsStr>>) {
+        let code = Command::new(&self.toolchain_paths.cppwinrt_path)
+            .args(args)
+            .spawn()
+            .unwrap()
+            .wait()
+            .unwrap();
+        assert!(code.success());
+    }
+
+    fn project_winmd(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>) {
+        self.cppwinrt(&[
+            OsStr::new("-input"), path.as_ref().as_os_str(),
+            OsStr::new("-output"), output_path.as_ref().as_os_str(),
+        ]);
+    }
+    fn project_winmd_with_references(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>, references: impl IntoIterator<Item=impl AsRef<OsStr>>) {
+        let mut args = vec![
+            OsString::from("-input"), path.as_ref().as_os_str().to_owned(),
+            OsString::from("-output"), output_path.as_ref().as_os_str().to_owned(),
+        ];
+        for reference in references {
+            args.push("-reference".into());
+            args.push(reference.as_ref().to_owned());
+        }
+        self.cppwinrt(args);
+    }
+
+    pub fn project_winsdk(&self) {
+        self.project_winmd("sdk", "yoyoma");
+        for winmd_path in &self.toolchain_paths.winmd_paths {
+            self.project_winmd_with_references(winmd_path, "yoyoma", &["local"]);
+        }
     }
 
     fn compile_directory_recursive(&self, paths: &SrcPaths, newest_header: u64, obj_paths: &mut Vec<PathBuf>) -> bool {
@@ -234,6 +365,7 @@ impl BuildEnvironment {
         success
     }
 
+
     pub fn compile_directory(
         &self,
         paths: &SrcPaths,
@@ -264,7 +396,7 @@ impl BuildEnvironment {
             )
         );
         args.push(path.as_os_str().to_owned());
-        let output = Command::new(&self.compiler_path)
+        let output = Command::new(&self.toolchain_paths.compiler_path)
             .args(&args)
             .output()
             .expect("failed to execute process");
@@ -302,7 +434,7 @@ impl BuildEnvironment {
         for path in lib_paths {
             args.push(path.as_ref().as_os_str().to_owned());
         }
-        let output = Command::new(&self.linker_path)
+        let output = Command::new(&self.toolchain_paths.linker_path)
             .args(&args)
             .output()
             .expect("failed to execute process");
@@ -566,7 +698,7 @@ impl ToolchainPaths {
         path.push(newest_version::<_, 4>(&path).unwrap());
         path.push("x64");
         path.push("midl.exe");
-        let midlrt_path = path;
+        let midl_path = path;
 
         Ok(
             ToolchainPaths {
@@ -578,7 +710,7 @@ impl ToolchainPaths {
                 foundation_contract_path,
 
                 cppwinrt_path,
-                midlrt_path,
+                midl_path,
                 winmd_paths,
             }
         )
