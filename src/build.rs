@@ -16,11 +16,15 @@ pub struct ToolchainPaths {
     pub debugger_path: PathBuf,
     pub include_paths: Vec<PathBuf>,
     pub lib_paths: Vec<PathBuf>,
+
     pub foundation_contract_path: PathBuf,
+
+    /// The paths to WinMDs included in the downloaded Nuget packages, plus the UnionMetadata directory
+    pub winmd_paths: Vec<PathBuf>,
 
     pub cppwinrt_path: PathBuf,
     pub midl_path: PathBuf,
-    pub winmd_paths: Vec<PathBuf>,
+    pub mdmerge_path: PathBuf,
 }
 
 pub struct BuildEnvironment<'a> {
@@ -251,34 +255,71 @@ impl<'a> BuildEnvironment<'a> {
         assert!(code.success());
     }
 
-    pub fn compile_idl_directory(&self, paths: &SrcPaths) {
-        fs::create_dir_all("generated_sources").unwrap();
+    pub fn compile_idl_directory_recursive(&self, paths: &SrcPaths, winmd_paths: &mut Vec<PathBuf>) {
         for idl_path in &paths.idl_paths {
             let winmd_path = self.get_artifact_path(idl_path, &self.local_winmds_path, "winmd");
             self.compile_idl(idl_path, &winmd_path);
-            let references = self.toolchain_paths.winmd_paths.iter().cloned()
-                .chain(iter::once(PathBuf::from("local")));
-
-            
-            let mut args = vec![
-                OsString::from("-input"), winmd_path.as_os_str().to_owned(),
-                OsString::from("-output"), OsString::from("."),
-                OsString::from("-component"), OsString::from("generated_sources"),
-                OsString::from("-name"), OsString::from("WinUITest"),
-                OsString::from("-prefix"),
-                OsString::from("-overwrite"),
-                OsString::from("-optimize"),
-            ];
-            for reference in references {
-                args.push("-reference".into());
-                args.push(reference.as_os_str().to_owned());
-            }
-            self.cppwinrt(args);
+            winmd_paths.push(winmd_path);
         }
 
         for child in &paths.children {
-            self.compile_idl_directory(child);
+            self.compile_idl_directory_recursive(child, winmd_paths);
         }
+    }
+
+    pub fn compile_idl_directory(&self, paths: &SrcPaths) {
+        let mut winmd_paths = Vec::new();
+        self.compile_idl_directory_recursive(paths, &mut winmd_paths);
+        
+        let _unused = fs::remove_dir_all("merged_winmds");
+        fs::create_dir_all("merged_winmds").unwrap();
+        let mut args = vec![
+            "/v".into(),
+            "/partial".into(),
+            "/o".into(), "merged_winmds".into(),
+            "/n:1".into(),
+        ];
+        for reference in &self.toolchain_paths.winmd_paths {
+            args.push("/metadata_dir".into());
+            args.push(reference.as_os_str().to_owned());
+        }
+        for input in winmd_paths {
+            args.push("/i".into());
+            args.push(input.as_os_str().to_owned());
+        }
+
+        let code = Command::new(&self.toolchain_paths.mdmerge_path)
+            .args(args)
+            .spawn()
+            .unwrap()
+            .wait()
+            .unwrap();
+        assert!(code.success());
+
+        let references = self.toolchain_paths.winmd_paths.iter().cloned()
+            .chain(iter::once(PathBuf::from("local")));
+        fs::create_dir_all("generated_sources").unwrap();
+        let mut args = vec![
+            OsString::from("-output"), OsString::from("."),
+            OsString::from("-component"), OsString::from("generated_sources"),
+            OsString::from("-name"), OsString::from("WinUITest"),
+            OsString::from("-prefix"),
+            OsString::from("-overwrite"),
+            OsString::from("-optimize"),
+        ];
+        for reference in references {
+            args.push("-reference".into());
+            args.push(reference.as_os_str().to_owned());
+        }
+        for entry in fs::read_dir("merged_winmds").unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_file() && path.extension() == Some(OsStr::new("winmd")) {
+                args.push("-in".into());
+                args.push(path.as_os_str().to_owned());
+            }
+        }
+        self.cppwinrt(args);
     }
 
     fn cppwinrt(&self, args: impl IntoIterator<Item=impl AsRef<OsStr>>) {
@@ -395,6 +436,10 @@ impl<'a> BuildEnvironment<'a> {
                 self.get_artifact_path(path, &obj_path, "pdb")
             )
         );
+        args.push("/I".into());
+        args.push(".".into());
+        args.push("/I".into());
+        args.push("yoyoma".into());
         args.push(path.as_os_str().to_owned());
         let output = Command::new(&self.toolchain_paths.compiler_path)
             .args(&args)
@@ -424,7 +469,7 @@ impl<'a> BuildEnvironment<'a> {
         output_path.set_extension("exe");
         args.push(
             cmd_flag(
-                "/out:{}",
+                "/out:",
                 output_path,
             )
         );
@@ -647,7 +692,7 @@ impl ToolchainPaths {
         path.push("Include");
         // TODO: error handling
         path.push(newest_version::<_, 4>(&path).unwrap());
-        include_paths.push(path.clone());
+        // include_paths.push(path.clone());
         for name in &["ucrt", "shared", "um", "winrt"] {
             path.push(name);
             include_paths.push(path.clone());
@@ -682,7 +727,6 @@ impl ToolchainPaths {
             if is_foundation_contract {
                 path.push(newest_version::<_, 4>(&path).unwrap());
                 foundation_contract_path = Some(path);
-                break;
             }
         }
         let foundation_contract_path = foundation_contract_path.unwrap();
@@ -697,8 +741,8 @@ impl ToolchainPaths {
         // TODO: error handling
         path.push(newest_version::<_, 4>(&path).unwrap());
         path.push("x64");
-        path.push("midl.exe");
-        let midl_path = path;
+        let midl_path = path.join("midl.exe");
+        let mdmerge_path = path.join("mdmerge.exe");
 
         Ok(
             ToolchainPaths {
@@ -707,11 +751,13 @@ impl ToolchainPaths {
                 debugger_path,
                 include_paths,
                 lib_paths,
+
                 foundation_contract_path,
+                winmd_paths,
 
                 cppwinrt_path,
                 midl_path,
-                winmd_paths,
+                mdmerge_path,
             }
         )
     }
