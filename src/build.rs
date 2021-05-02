@@ -151,6 +151,7 @@ impl<'a> BuildEnvironment<'a> {
                 let mut flags: Vec<OsString> = vec![
                     "/nologo".into(),
                     "/debug".into(),
+                    "/appcontainer".into(),
                 ];
                 flags.push(
                     format!(
@@ -645,8 +646,8 @@ impl ToolchainPaths {
         let version = path.clone();
 
         path.push("bin");
-        path.push("Hostx64");
-        path.push("x64");
+        path.push("Hostx86");
+        path.push("x86");
         let bin = path.clone();
 
         path.push("cl.exe");
@@ -666,7 +667,7 @@ impl ToolchainPaths {
 
         let mut path = atlmfc;
         path.push("lib");
-        path.push("x64");
+        path.push("x86");
         lib_paths.push(path);
 
         let mut path = version.clone();
@@ -675,7 +676,7 @@ impl ToolchainPaths {
 
         let mut path = version;
         path.push("lib");
-        path.push("x64");
+        path.push("x86");
         lib_paths.push(path);
 
         let mut path = edition;
@@ -705,7 +706,7 @@ impl ToolchainPaths {
         path.push(newest_version::<_, 4>(&path).unwrap());
         for name in &["ucrt", "um"] {
             path.push(name);
-            path.push("x64");
+            path.push("x86");
             lib_paths.push(path.clone());
             path.pop();
             path.pop();
@@ -740,7 +741,7 @@ impl ToolchainPaths {
         path.push("bin");
         // TODO: error handling
         path.push(newest_version::<_, 4>(&path).unwrap());
-        path.push("x64");
+        path.push("x86");
         let midl_path = path.join("midl.exe");
         let mdmerge_path = path.join("mdmerge.exe");
 
