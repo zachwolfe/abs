@@ -7,6 +7,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::windows::prelude::*;
 use std::iter;
 use std::collections::HashMap;
+use std::array::IntoIter;
 
 use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
@@ -33,11 +34,17 @@ pub struct BuildEnvironment<'a> {
     linker_flags: Vec<OsString>,
     midl_flags: Vec<OsString>,
 
+    midl_dependencies: Vec<PathBuf>,
+    linker_lib_dependencies: Vec<PathBuf>,
+
     toolchain_paths: &'a ToolchainPaths,
     config: &'a ProjectConfig,
     src_dir_path: PathBuf,
     objs_path: PathBuf,
-    local_winmds_path: PathBuf,
+    unmerged_winmds_path: PathBuf,
+    merged_winmds_path: PathBuf,
+    generated_sources_path: PathBuf,
+    external_projections_path: PathBuf,
 
     file_edit_times: HashMap<PathBuf, u64>,
 }
@@ -49,6 +56,7 @@ pub enum BuildError {
     CompilerError { stdout: String },
     LinkerError { stdout: String },
     CppWinRtError,
+    IdlError,
 
     IoError(io::Error),
 }
@@ -110,6 +118,56 @@ fn cmd_flag(flag: impl AsRef<OsStr>, argument: impl AsRef<OsStr>) -> OsString {
     string
 }
 
+#[derive(Clone, Default)]
+struct DependencyBuilder {
+    dependencies: Vec<PathBuf>,
+}
+
+impl DependencyBuilder {
+    fn file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.dependencies.push(path.into());
+        self
+    }
+
+    fn files(mut self, files: impl IntoIterator<Item=impl Into<PathBuf>>) -> Self {
+        self.dependencies.extend(files.into_iter().map(|path| path.into()));
+        self
+    }
+
+    fn files_in(mut self, path: impl AsRef<Path>, extension: impl AsRef<OsStr>) -> io::Result<Self> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                let path = entry.path();
+                if path.extension() == Some(extension.as_ref()) {
+                    self.dependencies.push(path);
+                }
+            }
+        }
+
+        Ok(self)
+    }
+
+    fn files_in_recursively(mut self, path: impl AsRef<Path>, extension: impl AsRef<OsStr> + Clone) -> io::Result<Self> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_file() {
+                let path = entry.path();
+                if path.extension() == Some(extension.as_ref()) {
+                    self.dependencies.push(path);
+                }
+            } else if file_type.is_dir() {
+                self = self.files_in_recursively(entry.path(), extension.clone())?;
+            }
+        }
+
+        Ok(self)
+    }
+
+    fn build(self) -> Vec<PathBuf> { self.dependencies }
+}
+
 impl<'a> BuildEnvironment<'a> {
     pub fn new<'b>(
         host: Host,
@@ -118,7 +176,10 @@ impl<'a> BuildEnvironment<'a> {
         toolchain_paths: &'a ToolchainPaths,
         definitions: impl IntoIterator<Item=&'b [impl AsRef<str> + 'b; 2]>,
         objs_path: impl Into<PathBuf>,
-        local_winmds_path: impl Into<PathBuf>,
+        unmerged_winmds_path: impl Into<PathBuf>,
+        merged_winmds_path: impl Into<PathBuf>,
+        generated_sources_path: impl Into<PathBuf>,
+        external_projections_path: impl Into<PathBuf>,
     ) -> Self {
         let compiler_flags = match host {
             Host::Windows => {
@@ -160,7 +221,7 @@ impl<'a> BuildEnvironment<'a> {
                 flags
             },
         };
-        let linker_flags = match host {
+        let (linker_flags, linker_lib_dependencies) = match host {
             Host::Windows => {
                 let mut flags: Vec<OsString> = vec![
                     "/nologo".into(),
@@ -176,13 +237,25 @@ impl<'a> BuildEnvironment<'a> {
                         },
                     ).into()
                 );
+                let mut dependencies = DependencyBuilder::default();
+                // TODO: Speed!!!
+                for lib in &config.link_libraries {
+                    for lib_path in &toolchain_paths.lib_paths {
+                        for entry in fs::read_dir(lib_path).unwrap() {
+                            let entry = entry.unwrap();
+                            if entry.file_type().unwrap().is_file() && entry.file_name().to_str().map(str::to_lowercase) == Some(lib.to_lowercase()) {
+                                dependencies = dependencies.file(entry.path());
+                            }
+                        }
+                    }
+                }
                 for path in &toolchain_paths.lib_paths {
                     flags.push(cmd_flag("/LIBPATH:", path));
                 }
-                flags
+                (flags, dependencies.build())
             }
         };
-        let midl_flags = match host {
+        let (midl_flags, midl_dependencies) = match host {
             Host::Windows => {
                 let mut flags = vec![
                     "/winrt".into(),
@@ -213,11 +286,14 @@ impl<'a> BuildEnvironment<'a> {
                     "NT60".into(),
                     "/nomidl".into(),
                 ];
+                let mut dependencies = DependencyBuilder::default()
+                    .files_in(&toolchain_paths.foundation_contract_path, "winmd").unwrap();
                 for winmd_path in &toolchain_paths.winmd_paths {
                     for entry in fs::read_dir(winmd_path).unwrap() {
                         let path = entry.unwrap().path();
                         if path.extension() == Some(OsStr::new("winmd")) {
                             flags.push(OsString::from("/reference"));
+                            dependencies = dependencies.file(&path);
                             flags.push(path.as_os_str().to_owned());
                         }
                     }
@@ -225,8 +301,9 @@ impl<'a> BuildEnvironment<'a> {
                 for include_path in &toolchain_paths.include_paths {
                     flags.push(OsString::from("/I"));
                     flags.push(include_path.as_os_str().to_owned());
+                    dependencies = dependencies.files_in(include_path, "idl").unwrap();
                 }
-                flags
+                (flags, dependencies.build())
             },
         };
         BuildEnvironment {
@@ -234,11 +311,17 @@ impl<'a> BuildEnvironment<'a> {
             linker_flags,
             midl_flags,
 
+            midl_dependencies,
+            linker_lib_dependencies,
+
             toolchain_paths,
             config,
             src_dir_path: "src".into(),
             objs_path: objs_path.into(),
-            local_winmds_path: local_winmds_path.into(),
+            unmerged_winmds_path: unmerged_winmds_path.into(),
+            merged_winmds_path: merged_winmds_path.into(),
+            generated_sources_path: generated_sources_path.into(),
+            external_projections_path: external_projections_path.into(),
 
             file_edit_times: HashMap::new(),
         }
@@ -259,16 +342,45 @@ impl<'a> BuildEnvironment<'a> {
         }
     }
 
-    fn should_build_artifact(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path>) -> io::Result<bool> {
+    fn should_build_artifacts_impl(
+        &mut self,
+        dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>,
+        artifact_paths: impl IntoIterator<Item=impl AsRef<Path>>,
+        mut filter: impl FnMut(&Path) -> bool,
+    ) -> io::Result<bool> {
         // TODO: shouldn't really be necessary to collect in a Vec here.
         let dependencies: Result<Vec<_>, _> = dependency_paths.into_iter()
             .map(|path| self.edit_time(path, u64::MAX))
             .collect();
         let dependencies = dependencies?;
         let newest_dependency = dependencies.into_iter().max().unwrap_or(0u64);
-        let artifact = self.edit_time(artifact_path, 0)?;
 
-        Ok(newest_dependency > artifact)
+        let artifacts: Result<Vec<_>, _> = artifact_paths.into_iter()
+            .filter(|path|
+                filter(path.as_ref())
+            )
+            .map(|path| self.edit_time(path, 0u64))
+            .collect();
+        let artifacts = artifacts?;
+        let oldest_artifact = artifacts.into_iter().min().unwrap_or(0u64);
+
+        Ok(newest_dependency >= oldest_artifact)
+    }
+
+    fn should_build_artifact(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path>) -> io::Result<bool> {
+        self.should_build_artifacts_impl(dependency_paths, IntoIter::new([artifact_path]), |_| true)
+    }
+
+    fn should_build_artifacts(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path>, extensions: impl IntoIterator<Item=impl AsRef<OsStr>> + Clone) -> io::Result<bool> {
+        let artifact_path = artifact_path.as_ref();
+        if !artifact_path.exists() { return Ok(true); }
+        let artifact_paths: Result<Vec<_>, _> = fs::read_dir(artifact_path)?.map(|entry| entry.map(|entry| entry.path())).collect();
+        
+        self.should_build_artifacts_impl(
+            dependency_paths,
+            artifact_paths?,
+            |artifact| extensions.clone().into_iter().any(|desired| artifact.extension() == Some(desired.as_ref()))
+        )
     }
 
     pub fn build(&mut self, artifact_path: impl AsRef<Path>) -> Result<(), BuildError> {
@@ -283,19 +395,14 @@ impl<'a> BuildEnvironment<'a> {
             }
         };
         let mut obj_paths = Vec::new();
-        self.compile_idl_directory(&paths)?;
+        self.compile_all_idls(&paths)?;
         self.project_winsdk()?;
         self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths)?;
-        self.link(&self.config.name, &artifact_path, obj_paths, &self.config.link_libraries)?;
-        Ok(())
-    }
-
-    fn project_winsdk(&self) -> Result<(), BuildError> {
-        self.project_winmd("sdk", "yoyoma")?;
-        for winmd_path in &self.toolchain_paths.winmd_paths {
-            self.project_winmd_with_references(winmd_path, "yoyoma", &["local"])?;
-        }
-
+        self.link(
+            &self.config.name,
+            &artifact_path,
+            obj_paths,
+        )?;
         Ok(())
     }
 
@@ -312,87 +419,108 @@ impl<'a> BuildEnvironment<'a> {
         path
     }
 
-    fn compile_idl(&self, path: impl AsRef<Path>, winmd_path: impl AsRef<Path>) {
+    fn compile_idl(&mut self, path: impl AsRef<Path>, winmd_path: impl AsRef<Path>) -> Result<(), BuildError> {
         let mut flags = self.midl_flags.clone();
-        flags.push("/winmd".into());
-        flags.push(winmd_path.as_ref().as_os_str().to_os_string());
-        flags.push(path.as_ref().as_os_str().to_owned());
-        let code = Command::new(&self.toolchain_paths.midl_path)
-            .args(flags)
-            .env("PATH", self.toolchain_paths.compiler_path.parent().unwrap())
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
-
-        assert!(code.success());
+        let winmd_path = winmd_path.as_ref();
+        let deps: Vec<_> = self.midl_dependencies.iter()
+            .cloned()
+            .chain(iter::once(path.as_ref().to_owned()))
+            .collect();
+        if self.should_build_artifact(deps, winmd_path)? {
+            flags.push("/winmd".into());
+            flags.push(winmd_path.as_os_str().to_os_string());
+            flags.push(path.as_ref().as_os_str().to_owned());
+            let code = Command::new(&self.toolchain_paths.midl_path)
+                .args(flags)
+                .env("PATH", self.toolchain_paths.compiler_path.parent().unwrap())
+                .spawn()
+                .unwrap()
+                .wait()
+                .unwrap();
+    
+            if code.success() {
+                Ok(())
+            } else {
+                Err(BuildError::IdlError)
+            }
+        } else {
+            Ok(())
+        }
     }
 
-    pub fn compile_idl_directory_recursive(&self, paths: &SrcPaths, winmd_paths: &mut Vec<PathBuf>) {
+    pub fn compile_idl_directory_recursive(&mut self, paths: &SrcPaths, winmd_paths: &mut Vec<PathBuf>) -> Result<(), BuildError> {
         for idl_path in &paths.idl_paths {
-            let winmd_path = self.get_artifact_path(idl_path, &self.local_winmds_path, "winmd");
-            self.compile_idl(idl_path, &winmd_path);
+            let winmd_path = self.get_artifact_path(idl_path, &self.unmerged_winmds_path, "winmd");
+            self.compile_idl(idl_path, &winmd_path)?;
             winmd_paths.push(winmd_path);
         }
 
         for child in &paths.children {
-            self.compile_idl_directory_recursive(child, winmd_paths);
+            self.compile_idl_directory_recursive(child, winmd_paths)?;
         }
+
+        Ok(())
     }
 
-    pub fn compile_idl_directory(&self, paths: &SrcPaths) -> Result<(), BuildError> {
+    pub fn compile_all_idls(&mut self, paths: &SrcPaths) -> Result<(), BuildError> {
         let mut winmd_paths = Vec::new();
-        self.compile_idl_directory_recursive(paths, &mut winmd_paths);
-        
-        let _unused = fs::remove_dir_all("merged_winmds");
-        fs::create_dir_all("merged_winmds").unwrap();
+        self.compile_idl_directory_recursive(paths, &mut winmd_paths)?;
+
+        let mut dependencies = DependencyBuilder::default()
+            .files(&winmd_paths);
         let mut args = vec![
             "/v".into(),
             "/partial".into(),
-            "/o".into(), "merged_winmds".into(),
+            "/o".into(), self.merged_winmds_path.as_os_str().to_owned(),
             "/n:1".into(),
         ];
         for reference in &self.toolchain_paths.winmd_paths {
             args.push("/metadata_dir".into());
             args.push(reference.as_os_str().to_owned());
+            dependencies = dependencies.files_in(reference, "winmd")?;
         }
         for input in winmd_paths {
             args.push("/i".into());
             args.push(input.as_os_str().to_owned());
         }
 
-        let code = Command::new(&self.toolchain_paths.mdmerge_path)
-            .args(args)
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
-        assert!(code.success());
+        let merged_path = self.merged_winmds_path.join(&format!("{}.winmd", &self.config.name));
+        if self.should_build_artifact(dependencies.build(), &merged_path)? {
+            let code = Command::new(&self.toolchain_paths.mdmerge_path)
+                .args(args)
+                .spawn()
+                .unwrap()
+                .wait()
+                .unwrap();
+            assert!(code.success());
+        }
 
-        let references = self.toolchain_paths.winmd_paths.iter().cloned()
-            .chain(iter::once(PathBuf::from("local")));
-        fs::create_dir_all("generated_sources").unwrap();
-        let mut args = vec![
-            OsString::from("-output"), OsString::from("."),
-            OsString::from("-component"), OsString::from("generated_sources"),
-            OsString::from("-name"), OsString::from("WinUITest"),
-            OsString::from("-prefix"),
-            OsString::from("-overwrite"),
-            OsString::from("-optimize"),
-        ];
-        for reference in references {
-            args.push("-reference".into());
-            args.push(reference.as_os_str().to_owned());
+        let references = self.toolchain_paths.winmd_paths.iter().cloned();
+        let mut dependencies = DependencyBuilder::default();
+        for path in &self.toolchain_paths.winmd_paths {
+            dependencies = dependencies.files_in(path, "winmd")?;
         }
-        for entry in fs::read_dir("merged_winmds").unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if entry.file_type().unwrap().is_file() && path.extension() == Some(OsStr::new("winmd")) {
-                args.push("-in".into());
-                args.push(path.as_os_str().to_owned());
+
+        let generated_sources_path = self.generated_sources_path.clone();
+        if self.should_build_artifacts(dependencies.clone().build(), &generated_sources_path, IntoIter::new(["h", "cpp"]))? {
+            let mut args = vec![
+                OsString::from("-output"), generated_sources_path.as_os_str().to_owned(),
+                OsString::from("-component"),
+                OsString::from("-name"), OsString::from(&self.config.name),
+                OsString::from("-prefix"),
+                OsString::from("-overwrite"),
+                OsString::from("-optimize"),
+            ];
+            for reference in references {
+                args.push("-reference".into());
+                args.push(reference.as_os_str().to_owned());
             }
+            args.extend(IntoIter::new(["-in".into(), merged_path.as_os_str().to_os_string()]));
+            
+            self.cppwinrt(args)
+        } else {
+            Ok(())
         }
-        self.cppwinrt(args)
     }
 
     fn cppwinrt(&self, args: impl IntoIterator<Item=impl AsRef<OsStr>>) -> Result<(), BuildError> {
@@ -429,6 +557,24 @@ impl<'a> BuildEnvironment<'a> {
         self.cppwinrt(args)
     }
 
+    fn project_winsdk(&mut self) -> Result<(), BuildError> {
+        let mut dependencies = DependencyBuilder::default()
+            .files_in_recursively(r"C:\Windows\System32\WinMetadata", "winmd")?;
+        for winmd_path in &self.toolchain_paths.winmd_paths {
+            dependencies = dependencies.files_in_recursively(winmd_path, "winmd")?;
+        }
+        let external_projections_path = self.external_projections_path.clone();
+        if self.should_build_artifacts(dependencies.build(), external_projections_path.join("winrt"), IntoIter::new(["h"]))? {
+            println!("Projecting the Windows SDK");
+            self.project_winmd("sdk", &self.external_projections_path)?;
+            for winmd_path in &self.toolchain_paths.winmd_paths {
+                self.project_winmd_with_references(winmd_path, &self.external_projections_path, &["local"])?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn compile_directory<'b>(
         &mut self,
         paths: &'b SrcPaths,
@@ -436,10 +582,14 @@ impl<'a> BuildEnvironment<'a> {
         obj_paths: &mut Vec<PathBuf>,
     ) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
+        let dependencies = DependencyBuilder::default()
+            .files(header_paths.clone())
+            .files_in(&self.generated_sources_path, "h")?
+            .files_in_recursively(&self.external_projections_path, "h")?;
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
             obj_paths.push(obj_path.clone());
-            if self.should_build_artifact(header_paths.clone().into_iter().chain(iter::once(path.as_path())), &obj_path)? {
+            if self.should_build_artifact(dependencies.clone().file(path).build(), &obj_path)? {
                 let mut obj_subdir_path = obj_path;
                 obj_subdir_path.pop();
                 fs::create_dir_all(&obj_subdir_path).unwrap();
@@ -458,6 +608,7 @@ impl<'a> BuildEnvironment<'a> {
         let mut args = self.compiler_flags.clone();
         let path = path.as_ref();
 
+        println!("Compiling {}", path.as_os_str().to_string_lossy());
         args.push(
             cmd_flag(
                 "/Fo",
@@ -471,9 +622,9 @@ impl<'a> BuildEnvironment<'a> {
             )
         );
         args.push("/I".into());
-        args.push(".".into());
+        args.push(self.generated_sources_path.as_os_str().to_owned());
         args.push("/I".into());
-        args.push("yoyoma".into());
+        args.push(self.external_projections_path.as_os_str().to_owned());
         args.push(path.as_os_str().to_owned());
         let output = Command::new(&self.toolchain_paths.compiler_path)
             .args(&args)
@@ -488,45 +639,49 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     pub fn link(
-        &self,
+        &mut self,
         project_name: &str,
         output_path: impl AsRef<Path>,
-        obj_paths: impl IntoIterator<Item=impl AsRef<Path>>,
-        lib_paths: impl IntoIterator<Item=impl AsRef<Path>>,
-    ) -> Result<String, BuildError> {
+        obj_paths: impl IntoIterator<Item=impl AsRef<Path>> + Clone,
+    ) -> Result<(), BuildError> {
         let mut args = self.linker_flags.clone();
         let mut output_path = output_path.as_ref().to_owned();
         output_path.push(project_name);
         output_path.set_extension("exe");
-        args.push(
-            cmd_flag(
-                "/out:",
-                output_path,
-            )
-        );
-        for path in obj_paths {
-            args.push(path.as_ref().as_os_str().to_owned());
+
+        let dependencies: Vec<_> = obj_paths.clone().into_iter().map(|path| path.as_ref().to_owned())
+            .chain(self.linker_lib_dependencies.iter().cloned())
+            .collect();
+        if self.should_build_artifact(dependencies, &output_path)? {
+            println!("Linking {}...", output_path.to_string_lossy());
+            args.push(
+                cmd_flag(
+                    "/out:",
+                    output_path,
+                )
+            );
+            for path in obj_paths {
+                args.push(path.as_ref().as_os_str().to_owned());
+            }
+            for path in &self.config.link_libraries {
+                args.push(path.into());
+            }
+            let output = Command::new(&self.toolchain_paths.linker_path)
+                .args(&args)
+                .output()
+                .expect("failed to execute process");
+            let stdout = std::str::from_utf8(&output.stdout).unwrap().to_string();
+            if !output.status.success() {
+                return Err(BuildError::LinkerError { stdout });
+            }
         }
-        for path in lib_paths {
-            args.push(path.as_ref().as_os_str().to_owned());
-        }
-        let output = Command::new(&self.toolchain_paths.linker_path)
-            .args(&args)
-            .output()
-            .expect("failed to execute process");
-        let stdout = std::str::from_utf8(&output.stdout).unwrap().to_string();
-        if output.status.success() {
-            Ok(stdout)
-        } else {
-            Err(BuildError::LinkerError { stdout })
-        }
+        Ok(())
     }
 }
 
 fn get_nuget_path() -> &'static Path {
     let path = Path::new(r"abs\vs\nuget.exe");
     if path.is_file() {
-        println!("Found nuget.");
         return path;
     }
 
@@ -563,7 +718,6 @@ fn download_nuget_deps(deps: &[&str]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for &dep in deps {
         if let Some(existing) = find_nuget_package(dep, packages_path) {
-            println!("Found {}.", dep);
             paths.push(existing.clone());
             continue;
         }
@@ -731,7 +885,7 @@ impl ToolchainPaths {
         path.push("Lib");
         // TODO: error handling
         path.push(newest_version::<_, 4>(&path).unwrap());
-        for name in &["ucrt", "um"] {
+        for &name in &["ucrt", "um"] {
             path.push(name);
             path.push("x86");
             lib_paths.push(path.clone());

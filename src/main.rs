@@ -98,9 +98,7 @@ int main() {{
             let config: ProjectConfig = serde_json::from_reader(config_file)
                 .unwrap_or_else(|error| fail_immediate!("Failed to parse project file: {}", error));
 
-            print!("Finding toolchain paths...");
             let toolchain_paths = ToolchainPaths::find().unwrap();
-            println!("done.");
             
             // Create abs/debug or abs/release, if it doesn't exist already
             let artifact_subdirectory = match build_options.compile_mode {
@@ -119,16 +117,23 @@ int main() {{
                 );
             }
 
-            let local_winmds_path = artifact_path.join("winmd");
-            if let Some(kind) = fs::create_dir_all(&local_winmds_path).err().map(|error| error.kind()) {
-                fail_immediate!(
-                    "Unable to create winmd directory structure: {:?}.",
-                    match kind {
-                        IoErrorKind::PermissionDenied => "permission denied".to_string(),
-                        kind => format!("{:?}", kind),
-                    }
-                );
-            }
+            let unmerged_winmds_path = artifact_path.join("unmerged_metadata");
+            let merged_winmds_path = artifact_path.join("merged_metadata");
+            let generated_sources_path = artifact_path.join("generated_sources");
+            let external_projections_path = artifact_path.join("external_projections");
+            fs::create_dir_all(&unmerged_winmds_path)
+                .and_then(|_| fs::create_dir_all(&merged_winmds_path))
+                .and_then(|_| fs::create_dir_all(&generated_sources_path))
+                .and_then(|_| fs::create_dir_all(&external_projections_path))
+                .map_err(|err| {
+                    fail_immediate!(
+                        "Unable to create winmd directory structure: {:?}.",
+                        match err.kind() {
+                            IoErrorKind::PermissionDenied => "permission denied".to_string(),
+                            kind => format!("{:?}", kind),
+                        }
+                    );
+                }).expect("should be unreachable");
 
             let mut env = BuildEnvironment::new(
                 Host::Windows,
@@ -137,7 +142,10 @@ int main() {{
                 &toolchain_paths,
                 &[["_WINDOWS", ""], ["WIN32", ""], ["UNICODE", ""], ["_USE_MATH_DEFINES", ""]],
                 objs_path,
-                local_winmds_path,
+                unmerged_winmds_path,
+                merged_winmds_path,
+                generated_sources_path,
+                external_projections_path,
             );
 
             if let Some(error) = env.build(&artifact_path).err() {
