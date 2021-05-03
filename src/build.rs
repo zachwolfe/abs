@@ -6,6 +6,7 @@ use std::process::Command;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::prelude::*;
 use std::iter;
+use std::collections::HashMap;
 
 use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
@@ -33,15 +34,29 @@ pub struct BuildEnvironment<'a> {
     midl_flags: Vec<OsString>,
 
     toolchain_paths: &'a ToolchainPaths,
+    config: &'a ProjectConfig,
     src_dir_path: PathBuf,
     objs_path: PathBuf,
     local_winmds_path: PathBuf,
+
+    file_edit_times: HashMap<PathBuf, u64>,
 }
 
 #[derive(Debug)]
-pub struct BuildError {
-    pub code: Option<i32>,
-    pub message: String,
+pub enum BuildError {
+    NoSrcDirectory,
+    CantReadSrcDirectory,
+    CompilerError { stdout: String },
+    LinkerError { stdout: String },
+    CppWinRtError,
+
+    IoError(io::Error),
+}
+
+impl From<io::Error> for BuildError {
+    fn from(err: io::Error) -> Self {
+        BuildError::IoError(err)
+    }
 }
 
 #[derive(Default)]
@@ -98,11 +113,10 @@ fn cmd_flag(flag: impl AsRef<OsStr>, argument: impl AsRef<OsStr>) -> OsString {
 impl<'a> BuildEnvironment<'a> {
     pub fn new<'b>(
         host: Host,
-        config: &ProjectConfig,
+        config: &'a ProjectConfig,
         build_options: &BuildOptions,
         toolchain_paths: &'a ToolchainPaths,
         definitions: impl IntoIterator<Item=&'b [impl AsRef<str> + 'b; 2]>,
-        src_dir_path: impl Into<PathBuf>,
         objs_path: impl Into<PathBuf>,
         local_winmds_path: impl Into<PathBuf>,
     ) -> Self {
@@ -221,10 +235,68 @@ impl<'a> BuildEnvironment<'a> {
             midl_flags,
 
             toolchain_paths,
-            src_dir_path: src_dir_path.into(),
+            config,
+            src_dir_path: "src".into(),
             objs_path: objs_path.into(),
             local_winmds_path: local_winmds_path.into(),
+
+            file_edit_times: HashMap::new(),
         }
+    }
+
+    fn edit_time(&mut self, path: impl AsRef<Path>, fallback: u64) -> io::Result<u64> {
+        let path = path.as_ref();
+        if let Some(&edit_time) = self.file_edit_times.get(path) {
+            Ok(edit_time)
+        } else {
+            let time = match fs::metadata(path) {
+                Ok(metadata) => metadata.last_write_time(),
+                Err(err) if matches!(err.kind(), io::ErrorKind::NotFound) => fallback,
+                Err(err) => return Err(err),
+            };
+            self.file_edit_times.insert(path.to_owned(), time);
+            Ok(time)
+        }
+    }
+
+    fn should_build_artifact(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path>) -> io::Result<bool> {
+        // TODO: shouldn't really be necessary to collect in a Vec here.
+        let dependencies: Result<Vec<_>, _> = dependency_paths.into_iter()
+            .map(|path| self.edit_time(path, u64::MAX))
+            .collect();
+        let dependencies = dependencies?;
+        let newest_dependency = dependencies.into_iter().max().unwrap_or(0u64);
+        let artifact = self.edit_time(artifact_path, 0)?;
+
+        Ok(newest_dependency > artifact)
+    }
+
+    pub fn build(&mut self, artifact_path: impl AsRef<Path>) -> Result<(), BuildError> {
+        let (paths, header_paths) = match SrcPaths::from_root(&self.src_dir_path) {
+            Ok(paths) => paths,
+            Err(error) => {
+                if let io::ErrorKind::NotFound = error.kind() {
+                    return Err(BuildError::NoSrcDirectory);
+                } else {
+                    return Err(BuildError::CantReadSrcDirectory);
+                }
+            }
+        };
+        let mut obj_paths = Vec::new();
+        self.compile_idl_directory(&paths)?;
+        self.project_winsdk()?;
+        self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths)?;
+        self.link(&self.config.name, &artifact_path, obj_paths, &self.config.link_libraries)?;
+        Ok(())
+    }
+
+    fn project_winsdk(&self) -> Result<(), BuildError> {
+        self.project_winmd("sdk", "yoyoma")?;
+        for winmd_path in &self.toolchain_paths.winmd_paths {
+            self.project_winmd_with_references(winmd_path, "yoyoma", &["local"])?;
+        }
+
+        Ok(())
     }
 
     /// Goes from a src file path to an artifact path relative to output_dir_path
@@ -268,7 +340,7 @@ impl<'a> BuildEnvironment<'a> {
         }
     }
 
-    pub fn compile_idl_directory(&self, paths: &SrcPaths) {
+    pub fn compile_idl_directory(&self, paths: &SrcPaths) -> Result<(), BuildError> {
         let mut winmd_paths = Vec::new();
         self.compile_idl_directory_recursive(paths, &mut winmd_paths);
         
@@ -320,26 +392,32 @@ impl<'a> BuildEnvironment<'a> {
                 args.push(path.as_os_str().to_owned());
             }
         }
-        self.cppwinrt(args);
+        self.cppwinrt(args)
     }
 
-    fn cppwinrt(&self, args: impl IntoIterator<Item=impl AsRef<OsStr>>) {
+    fn cppwinrt(&self, args: impl IntoIterator<Item=impl AsRef<OsStr>>) -> Result<(), BuildError> {
         let code = Command::new(&self.toolchain_paths.cppwinrt_path)
             .args(args)
             .spawn()
             .unwrap()
             .wait()
             .unwrap();
-        assert!(code.success());
+
+        if code.success() {
+            Ok(())
+        } else {
+            Err(BuildError::CppWinRtError)
+        }
     }
 
-    fn project_winmd(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>) {
+    fn project_winmd(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>) -> Result<(), BuildError> {
         self.cppwinrt(&[
             OsStr::new("-input"), path.as_ref().as_os_str(),
             OsStr::new("-output"), output_path.as_ref().as_os_str(),
-        ]);
+        ])
     }
-    fn project_winmd_with_references(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>, references: impl IntoIterator<Item=impl AsRef<OsStr>>) {
+
+    fn project_winmd_with_references(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>, references: impl IntoIterator<Item=impl AsRef<OsStr>>) -> Result<(), BuildError> {
         let mut args = vec![
             OsString::from("-input"), path.as_ref().as_os_str().to_owned(),
             OsString::from("-output"), output_path.as_ref().as_os_str().to_owned(),
@@ -348,77 +426,32 @@ impl<'a> BuildEnvironment<'a> {
             args.push("-reference".into());
             args.push(reference.as_ref().to_owned());
         }
-        self.cppwinrt(args);
+        self.cppwinrt(args)
     }
 
-    pub fn project_winsdk(&self) {
-        self.project_winmd("sdk", "yoyoma");
-        for winmd_path in &self.toolchain_paths.winmd_paths {
-            self.project_winmd_with_references(winmd_path, "yoyoma", &["local"]);
-        }
-    }
-
-    fn compile_directory_recursive(&self, paths: &SrcPaths, newest_header: u64, obj_paths: &mut Vec<PathBuf>) -> bool {
-        let mut success = true;
-        macro_rules! fail {
-            ($($t:tt)*) => {
-                println!($($t)*);
-                success = false;
-            }
-        }
-
+    pub fn compile_directory<'b>(
+        &mut self,
+        paths: &'b SrcPaths,
+        header_paths: impl IntoIterator<Item=&'b Path> + Clone,
+        obj_paths: &mut Vec<PathBuf>,
+    ) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
             obj_paths.push(obj_path.clone());
-            let mut needs_compile = true;
-            let src_modified = fs::metadata(path).unwrap().last_write_time();
-            if let Ok(metadata) = fs::metadata(&obj_path) {
-                let obj_modified = metadata.last_write_time();
-                if obj_modified > newest_header && obj_modified > src_modified {
-                    needs_compile = false;
-                }
-            }
-            if needs_compile {
+            if self.should_build_artifact(header_paths.clone().into_iter().chain(iter::once(path.as_path())), &obj_path)? {
                 let mut obj_subdir_path = obj_path;
                 obj_subdir_path.pop();
                 fs::create_dir_all(&obj_subdir_path).unwrap();
-                match self.compile(path, &self.objs_path) {
-                    Ok(message) => print!("Compiled {}", message),
-                    Err(error) => {
-                        fail!(
-                            "Attempted to compile {}Compilation failed{}.",
-                            error.message,
-                            if let Some(code) = error.code {
-                                format!(" with code {}", code)
-                            } else {
-                                String::new()
-                            },
-                        );
-                    }
-                }
+                print!("Compiled {}", self.compile(path, &self.objs_path)?);
             }
         }
 
         for child in &paths.children {
-            success &= self.compile_directory_recursive(child, newest_header, obj_paths);
+            self.compile_directory(child, header_paths.clone(), obj_paths)?;
         }
 
-        success
-    }
-
-
-    pub fn compile_directory(
-        &self,
-        paths: &SrcPaths,
-        header_paths: impl IntoIterator<Item=impl AsRef<Path>>,
-        obj_paths: &mut Vec<PathBuf>,
-    ) -> bool {
-        let newest_header = header_paths.into_iter().map(|header| {
-            fs::metadata(header).unwrap().last_write_time()
-        }).max().unwrap_or(0u64);
-
-        self.compile_directory_recursive(paths, newest_header, obj_paths)
+        Ok(())
     }
 
     fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>) -> Result<String, BuildError> {
@@ -450,10 +483,7 @@ impl<'a> BuildEnvironment<'a> {
         if output.status.success() {
             Ok(stdout)
         } else {
-            Err(BuildError {
-                code: output.status.code(),
-                message: stdout
-            })
+            Err(BuildError::CompilerError { stdout })
         }
     }
 
@@ -488,10 +518,7 @@ impl<'a> BuildEnvironment<'a> {
         if output.status.success() {
             Ok(stdout)
         } else {
-            Err(BuildError {
-                code: output.status.code(),
-                message: stdout
-            })
+            Err(BuildError::LinkerError { stdout })
         }
     }
 }

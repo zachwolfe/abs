@@ -14,7 +14,7 @@ mod proj_config;
 
 use proj_config::{ProjectConfig, OutputType, Host, CxxOptions};
 use cmd_options::{CmdOptions, CompileMode, Subcommand};
-use build::{BuildEnvironment, ToolchainPaths, SrcPaths};
+use build::{BuildEnvironment, ToolchainPaths};
 
 
 fn kill_debugger() {
@@ -29,7 +29,6 @@ fn main() {
     }
 
     let options = CmdOptions::parse();
-    let mut success = true;
     macro_rules! _task_failed {
         () => {
             println!(
@@ -42,13 +41,6 @@ fn main() {
                 },
             );
             std::process::exit(1);
-        }
-    }
-    macro_rules! check_success {
-        () => {
-            if !success {
-                _task_failed!();
-            }
         }
     }
     macro_rules! fail_immediate {
@@ -106,18 +98,6 @@ int main() {{
             let config: ProjectConfig = serde_json::from_reader(config_file)
                 .unwrap_or_else(|error| fail_immediate!("Failed to parse project file: {}", error));
 
-            let src_dir_path = Path::new("src");
-            let (paths, header_paths) = match SrcPaths::from_root(src_dir_path) {
-                Ok(paths) => paths,
-                Err(error) => {
-                    if let IoErrorKind::NotFound = error.kind() {
-                        fail_immediate!("src directory does not exist in current working directory.");
-                    } else {
-                        fail_immediate!("Unable to read src directory in current working directory.");
-                    }
-                }
-            };
-
             print!("Finding toolchain paths...");
             let toolchain_paths = ToolchainPaths::find().unwrap();
             println!("done.");
@@ -150,27 +130,20 @@ int main() {{
                 );
             }
 
-            let mut obj_paths = Vec::new();
-            let env = BuildEnvironment::new(
+            let mut env = BuildEnvironment::new(
                 Host::Windows,
                 &config,
                 &build_options,
                 &toolchain_paths,
                 &[["_WINDOWS", ""], ["WIN32", ""], ["UNICODE", ""], ["_USE_MATH_DEFINES", ""]],
-                src_dir_path,
                 objs_path,
                 local_winmds_path,
             );
 
-            env.compile_idl_directory(&paths);
-            env.project_winsdk();
-        
-            success &= env.compile_directory(&paths, &header_paths, &mut obj_paths);
-        
-            check_success!();
-            if let Some(error) = env.link(&config.name, &artifact_path, obj_paths, &config.link_libraries).err() {
-                fail_immediate!("{}", error.message);
+            if let Some(error) = env.build(&artifact_path).err() {
+                fail_immediate!("{:?}", error);
             }
+
             println!("Build succeeded.");
             (config, toolchain_paths, artifact_path)
         },
