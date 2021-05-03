@@ -106,28 +106,20 @@ int main() {{
                 CompileMode::Release => "release",
             };
             let artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
-            let objs_path = artifact_path.join("obj");
-            if let Some(kind) = fs::create_dir_all(&objs_path).err().map(|error| error.kind()) {
-                fail_immediate!(
-                    "Unable to create abs directory structure: {:?}.",
-                    match kind {
-                        IoErrorKind::PermissionDenied => "permission denied".to_string(),
-                        kind => format!("{:?}", kind),
-                    }
-                );
-            }
 
+            let objs_path = artifact_path.join("obj");
             let unmerged_winmds_path = artifact_path.join("unmerged_metadata");
             let merged_winmds_path = artifact_path.join("merged_metadata");
             let generated_sources_path = artifact_path.join("generated_sources");
             let external_projections_path = artifact_path.join("external_projections");
-            fs::create_dir_all(&unmerged_winmds_path)
+            fs::create_dir_all(&objs_path)
+                .and_then(|_| fs::create_dir_all(&unmerged_winmds_path))
                 .and_then(|_| fs::create_dir_all(&merged_winmds_path))
                 .and_then(|_| fs::create_dir_all(&generated_sources_path))
                 .and_then(|_| fs::create_dir_all(&external_projections_path))
                 .map_err(|err| {
                     fail_immediate!(
-                        "Unable to create winmd directory structure: {:?}.",
+                        "Unable to create abs directory structure: {:?}.",
                         match err.kind() {
                             IoErrorKind::PermissionDenied => "permission denied".to_string(),
                             kind => format!("{:?}", kind),

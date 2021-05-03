@@ -168,6 +168,13 @@ impl DependencyBuilder {
     fn build(self) -> Vec<PathBuf> { self.dependencies }
 }
 
+#[derive(Copy, Clone)]
+enum PchOption {
+    GeneratePch,
+    UsePch,
+    NoPch,
+}
+
 impl<'a> BuildEnvironment<'a> {
     pub fn new<'b>(
         host: Host,
@@ -364,7 +371,7 @@ impl<'a> BuildEnvironment<'a> {
         let artifacts = artifacts?;
         let oldest_artifact = artifacts.into_iter().min().unwrap_or(0u64);
 
-        Ok(newest_dependency >= oldest_artifact)
+        Ok(newest_dependency > oldest_artifact)
     }
 
     fn should_build_artifact(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path>) -> io::Result<bool> {
@@ -397,7 +404,22 @@ impl<'a> BuildEnvironment<'a> {
         let mut obj_paths = Vec::new();
         self.compile_all_idls(&paths)?;
         self.project_winsdk()?;
-        self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths)?;
+        let pch = paths.src_paths.iter().any(|path| path.file_name() == Some(OsStr::new("pch.cpp")));
+        if pch {
+            let pch_path = self.src_dir_path.join("pch.cpp");
+            let dependencies = DependencyBuilder::default()
+                .file(&pch_path)
+                .files(header_paths.clone())
+                .files_in(&self.generated_sources_path, "h")?
+                .files_in_recursively(&self.external_projections_path, "h")?;
+
+            let gen_pch_path = self.get_artifact_path(&pch_path, &self.objs_path, "pch");
+            if self.should_build_artifact(dependencies.build(), &gen_pch_path)? {
+                println!("Generating pre-compiled header");
+                print!("Compiled {}", self.compile(pch_path, &self.objs_path, PchOption::GeneratePch)?);
+            }
+        };
+        self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths, pch)?;
         self.link(
             &self.config.name,
             &artifact_path,
@@ -580,8 +602,10 @@ impl<'a> BuildEnvironment<'a> {
         paths: &'b SrcPaths,
         header_paths: impl IntoIterator<Item=&'b Path> + Clone,
         obj_paths: &mut Vec<PathBuf>,
+        pch: bool,
     ) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
+        let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
         let dependencies = DependencyBuilder::default()
             .files(header_paths.clone())
             .files_in(&self.generated_sources_path, "h")?
@@ -589,36 +613,51 @@ impl<'a> BuildEnvironment<'a> {
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
             obj_paths.push(obj_path.clone());
-            if self.should_build_artifact(dependencies.clone().file(path).build(), &obj_path)? {
+            let is_pch = path.file_name() == Some(OsStr::new("pch.cpp")) && path.parent() == Some(&self.src_dir_path);
+            if !is_pch && self.should_build_artifact(dependencies.clone().file(path).build(), &obj_path)? {
                 let mut obj_subdir_path = obj_path;
                 obj_subdir_path.pop();
                 fs::create_dir_all(&obj_subdir_path).unwrap();
-                print!("Compiled {}", self.compile(path, &self.objs_path)?);
+                print!("Compiled {}", self.compile(path, &self.objs_path, pch_option)?);
             }
         }
 
         for child in &paths.children {
-            self.compile_directory(child, header_paths.clone(), obj_paths)?;
+            self.compile_directory(child, header_paths.clone(), obj_paths, pch)?;
         }
 
         Ok(())
     }
 
-    fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>) -> Result<String, BuildError> {
+    fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<String, BuildError> {
         let mut args = self.compiler_flags.clone();
         let path = path.as_ref();
 
         println!("Compiling {}", path.as_os_str().to_string_lossy());
+        match pch {
+            PchOption::GeneratePch | PchOption::UsePch => args.push(
+                cmd_flag(
+                    "/Fp",
+                    self.get_artifact_path(self.src_dir_path.join("pch.h"), &obj_path, "pch"),
+                )
+            ),
+            PchOption::NoPch => {},
+        }
+        match pch {
+            PchOption::GeneratePch => args.push("/Ycpch.h".into()),
+            PchOption::UsePch => args.push("/Yupch.h".into()),
+            PchOption::NoPch => {},
+        }
         args.push(
             cmd_flag(
                 "/Fo",
-                self.get_artifact_path(path, &obj_path, "obj")
+                self.get_artifact_path(path, &obj_path, "obj"),
             )
         );
         args.push(
             cmd_flag(
                 "/Fd",
-                self.get_artifact_path(path, &obj_path, "pdb")
+                self.objs_path.join(&format!("{}.pdb", &self.config.name))
             )
         );
         args.push("/I".into());
