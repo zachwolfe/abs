@@ -27,6 +27,7 @@ pub struct ToolchainPaths {
     pub cppwinrt_path: PathBuf,
     pub midl_path: PathBuf,
     pub mdmerge_path: PathBuf,
+    pub makeappx_path: PathBuf,
 }
 
 pub struct BuildEnvironment<'a> {
@@ -40,6 +41,7 @@ pub struct BuildEnvironment<'a> {
     toolchain_paths: &'a ToolchainPaths,
     config: &'a ProjectConfig,
     src_dir_path: PathBuf,
+    artifact_path: PathBuf,
     objs_path: PathBuf,
     unmerged_winmds_path: PathBuf,
     merged_winmds_path: PathBuf,
@@ -183,13 +185,9 @@ impl<'a> BuildEnvironment<'a> {
         build_options: &BuildOptions,
         toolchain_paths: &'a ToolchainPaths,
         definitions: impl IntoIterator<Item=&'b [impl AsRef<str> + 'b; 2]>,
-        objs_path: impl Into<PathBuf>,
-        unmerged_winmds_path: impl Into<PathBuf>,
-        merged_winmds_path: impl Into<PathBuf>,
-        generated_sources_path: impl Into<PathBuf>,
-        external_projections_path: impl Into<PathBuf>,
-        package_dir_path: impl Into<PathBuf>,
-    ) -> Self {
+        artifact_path: impl Into<PathBuf>,
+    ) -> Result<Self, BuildError> {
+        let artifact_path = artifact_path.into();
         let compiler_flags = match host {
             Host::Windows => {
                 let mut flags: Vec<OsString> = vec![
@@ -315,7 +313,20 @@ impl<'a> BuildEnvironment<'a> {
                 (flags, dependencies.build())
             },
         };
-        BuildEnvironment {
+        let objs_path = artifact_path.join("obj");
+        let unmerged_winmds_path = artifact_path.join("unmerged_metadata");
+        let merged_winmds_path = artifact_path.join("merged_metadata");
+        let generated_sources_path = artifact_path.join("generated_sources");
+        let external_projections_path = artifact_path.join("external_projections");
+        let package_dir_path = artifact_path.join("AppX");
+        fs::create_dir_all(&objs_path)?;
+        fs::create_dir_all(&unmerged_winmds_path)?;
+        fs::create_dir_all(&merged_winmds_path)?;
+        fs::create_dir_all(&generated_sources_path)?;
+        fs::create_dir_all(&external_projections_path)?;
+        fs::create_dir_all(&package_dir_path)?;
+
+        Ok(BuildEnvironment {
             compiler_flags,
             linker_flags,
             midl_flags,
@@ -326,15 +337,16 @@ impl<'a> BuildEnvironment<'a> {
             toolchain_paths,
             config,
             src_dir_path: "src".into(),
-            objs_path: objs_path.into(),
-            unmerged_winmds_path: unmerged_winmds_path.into(),
-            merged_winmds_path: merged_winmds_path.into(),
-            generated_sources_path: generated_sources_path.into(),
-            external_projections_path: external_projections_path.into(),
-            package_dir_path: package_dir_path.into(),
+            artifact_path,
+            objs_path,
+            unmerged_winmds_path,
+            merged_winmds_path,
+            generated_sources_path,
+            external_projections_path,
+            package_dir_path,
 
             file_edit_times: HashMap::new(),
-        }
+        })
     }
 
     fn edit_time(&mut self, path: impl AsRef<Path>, fallback: u64) -> io::Result<u64> {
@@ -445,8 +457,19 @@ impl<'a> BuildEnvironment<'a> {
         )?;
         let package_file_paths = vec![
             artifact_path.as_ref().join(format!("{}.exe", self.config.name)),
+
+            // TODO: this is a horrible hack!
+            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Images".into(),
+            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\WinUITest".into(),
+            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\AppxManifest.xml".into(),
+            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ApplicationModel.Resources.winmd".into(),
+            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.Internal.FrameworkUdk.dll".into(),
+            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ui.xaml.dll".into(),
+            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\resources.pri".into(),
+            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
         ];
         self.copy_to_package_dir(package_file_paths)?;
+        self.create_package()?;
         Ok(())
     }
 
@@ -749,7 +772,9 @@ impl<'a> BuildEnvironment<'a> {
                         entry.map(|entry| entry.path())
                     )
                     .collect();
-                self.copy_to_package_dir_recursive(children?, output.as_ref().join(&file_name))?;
+                let write_dir_path = output.as_ref().join(&file_name);
+                fs::create_dir_all(&write_dir_path)?;
+                self.copy_to_package_dir_recursive(children?, &write_dir_path)?;
             } else if metadata.is_file() {
                 fs::copy(path.as_ref(), output.as_ref().join(&file_name))?;
             }
@@ -760,7 +785,28 @@ impl<'a> BuildEnvironment<'a> {
 
     fn copy_to_package_dir(&mut self, file_paths: impl IntoIterator<Item=impl AsRef<Path>>) -> Result<(), BuildError> {
         let package_dir_path = self.package_dir_path.clone();
+        // TODO: Speed, incrementalism
+        fs::remove_dir_all(&package_dir_path)?;
+        fs::create_dir_all(&package_dir_path)?;
         self.copy_to_package_dir_recursive(file_paths, package_dir_path)
+    }
+
+    fn create_package(&mut self) -> Result<(), BuildError> {
+        let code = Command::new(&self.toolchain_paths.makeappx_path)
+            .args(&[
+                "pack".into(),
+                "/o".into(),
+                "/d".into(),
+                self.package_dir_path.as_os_str().to_os_string(),
+                "/p".into(),
+                self.artifact_path.join(format!("{}.appx", &self.config.name)).as_os_str().to_os_string(),
+            ])
+            .spawn()
+            .unwrap()
+            .wait()
+            .unwrap();
+        assert!(code.success());
+        Ok(())
     }
 }
 
@@ -1010,6 +1056,7 @@ impl ToolchainPaths {
         path.push("x86");
         let midl_path = path.join("midl.exe");
         let mdmerge_path = path.join("mdmerge.exe");
+        let makeappx_path = path.join("makeappx.exe");
 
         Ok(
             ToolchainPaths {
@@ -1025,6 +1072,7 @@ impl ToolchainPaths {
                 cppwinrt_path,
                 midl_path,
                 mdmerge_path,
+                makeappx_path,
             }
         )
     }
