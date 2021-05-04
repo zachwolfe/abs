@@ -112,11 +112,13 @@ int main() {{
             let merged_winmds_path = artifact_path.join("merged_metadata");
             let generated_sources_path = artifact_path.join("generated_sources");
             let external_projections_path = artifact_path.join("external_projections");
+            let package_dir_path = artifact_path.join("AppX");
             fs::create_dir_all(&objs_path)
                 .and_then(|_| fs::create_dir_all(&unmerged_winmds_path))
                 .and_then(|_| fs::create_dir_all(&merged_winmds_path))
                 .and_then(|_| fs::create_dir_all(&generated_sources_path))
                 .and_then(|_| fs::create_dir_all(&external_projections_path))
+                .and_then(|_| fs::create_dir_all(&package_dir_path))
                 .map_err(|err| {
                     fail_immediate!(
                         "Unable to create abs directory structure: {:?}.",
@@ -138,6 +140,7 @@ int main() {{
                 merged_winmds_path,
                 generated_sources_path,
                 external_projections_path,
+                package_dir_path,
             );
 
             if let Some(error) = env.build(&artifact_path).err() {

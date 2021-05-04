@@ -45,6 +45,7 @@ pub struct BuildEnvironment<'a> {
     merged_winmds_path: PathBuf,
     generated_sources_path: PathBuf,
     external_projections_path: PathBuf,
+    package_dir_path: PathBuf,
 
     file_edit_times: HashMap<PathBuf, u64>,
 }
@@ -187,6 +188,7 @@ impl<'a> BuildEnvironment<'a> {
         merged_winmds_path: impl Into<PathBuf>,
         generated_sources_path: impl Into<PathBuf>,
         external_projections_path: impl Into<PathBuf>,
+        package_dir_path: impl Into<PathBuf>,
     ) -> Self {
         let compiler_flags = match host {
             Host::Windows => {
@@ -329,6 +331,7 @@ impl<'a> BuildEnvironment<'a> {
             merged_winmds_path: merged_winmds_path.into(),
             generated_sources_path: generated_sources_path.into(),
             external_projections_path: external_projections_path.into(),
+            package_dir_path: package_dir_path.into(),
 
             file_edit_times: HashMap::new(),
         }
@@ -440,6 +443,10 @@ impl<'a> BuildEnvironment<'a> {
             &artifact_path,
             obj_paths,
         )?;
+        let package_file_paths = vec![
+            artifact_path.as_ref().join(format!("{}.exe", self.config.name)),
+        ];
+        self.copy_to_package_dir(package_file_paths)?;
         Ok(())
     }
 
@@ -730,6 +737,30 @@ impl<'a> BuildEnvironment<'a> {
             }
         }
         Ok(())
+    }
+
+    fn copy_to_package_dir_recursive(&mut self, file_paths: impl IntoIterator<Item=impl AsRef<Path>>, output: impl AsRef<Path>) -> Result<(), BuildError> {
+        for path in file_paths {
+            let metadata = fs::metadata(path.as_ref())?;
+            let file_name = path.as_ref().file_name().clone().unwrap();
+            if metadata.is_dir() {
+                let children: Result<Vec<_>, _> = fs::read_dir(path.as_ref())?
+                    .map(|entry|
+                        entry.map(|entry| entry.path())
+                    )
+                    .collect();
+                self.copy_to_package_dir_recursive(children?, output.as_ref().join(&file_name))?;
+            } else if metadata.is_file() {
+                fs::copy(path.as_ref(), output.as_ref().join(&file_name))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn copy_to_package_dir(&mut self, file_paths: impl IntoIterator<Item=impl AsRef<Path>>) -> Result<(), BuildError> {
+        let package_dir_path = self.package_dir_path.clone();
+        self.copy_to_package_dir_recursive(file_paths, package_dir_path)
     }
 }
 
