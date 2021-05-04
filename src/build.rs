@@ -349,6 +349,21 @@ impl<'a> BuildEnvironment<'a> {
         }
     }
 
+    pub fn fail(&self, error: BuildError) -> ! {
+        print!("Build failed: ");
+        match error {
+            BuildError::NoSrcDirectory => println!("src directory does not exist."),
+            BuildError::CantReadSrcDirectory => println!("unable to read src directory."),
+            BuildError::CompilerError { stdout } => print!("unable to compile {}", stdout),
+            BuildError::LinkerError { stdout } => print!("unable to link {}", stdout),
+            BuildError::CppWinRtError => println!("there was a cppwinrt error."),
+            BuildError::IdlError => println!("there was a midl error."),
+
+            BuildError::IoError(io_error) => println!("there was an io error: {:?}.", io_error.kind()),
+        }
+        std::process::exit(1);
+    }
+
     fn should_build_artifacts_impl(
         &mut self,
         dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>,

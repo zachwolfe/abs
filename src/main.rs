@@ -141,7 +141,7 @@ int main() {{
             );
 
             if let Some(error) = env.build(&artifact_path).err() {
-                fail_immediate!("{:?}", error);
+                env.fail(error);
             }
 
             println!("Build succeeded.");
