@@ -28,6 +28,7 @@ pub struct ToolchainPaths {
     pub midl_path: PathBuf,
     pub mdmerge_path: PathBuf,
     pub makeappx_path: PathBuf,
+    pub signtool_path: PathBuf,
 }
 
 pub struct BuildEnvironment<'a> {
@@ -48,6 +49,10 @@ pub struct BuildEnvironment<'a> {
     generated_sources_path: PathBuf,
     external_projections_path: PathBuf,
     package_dir_path: PathBuf,
+    package_path: PathBuf,
+    cert_path: PathBuf,
+
+    signing_password: String,
 
     file_edit_times: HashMap<PathBuf, u64>,
 }
@@ -63,6 +68,10 @@ pub enum BuildError {
     IdlError,
     PackagingError,
     NugetError,
+    CreateCertificateError,
+    RetrieveCertificateError,
+    CertExportError,
+    SigningError,
 
     IoError(io::Error),
 }
@@ -185,6 +194,44 @@ fn run_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr
     } else {
         Err(error)
     }
+}
+
+fn run_cmd_for_result(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, error: BuildError) -> Result<String, BuildError> {
+    let output = Command::new(cmd)
+        .args(args)
+        .output()?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(error)
+    }
+}
+
+fn get_ps_args(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>) -> impl IntoIterator<Item=impl AsRef<OsStr>> {
+    let mut command = cmd.as_ref().to_owned();
+    for arg in args {
+        command.push(" ");
+        let arg: &OsStr = arg.as_ref();
+        let lossy_str = arg.to_string_lossy();
+        // The first condition here is a hack to support arrays
+        if lossy_str.chars().next() != Some('@') && lossy_str.contains(char::is_whitespace) {
+            command.push("\"");
+            command.push(arg);
+            command.push("\"");
+        } else {
+            command.push(arg);
+        }
+    }
+    IntoIter::new(["-command".into(), command])
+}
+
+fn run_ps_cmd_for_result(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, error: BuildError) -> Result<String, BuildError> {
+    run_cmd_for_result("powershell", get_ps_args(cmd, args), error)
+}
+
+fn run_ps_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, error: BuildError) -> Result<(), BuildError> {
+    run_cmd("powershell", get_ps_args(cmd, args), error)
 }
 
 #[derive(Copy, Clone)]
@@ -335,6 +382,8 @@ impl<'a> BuildEnvironment<'a> {
         let generated_sources_path = artifact_path.join("generated_sources");
         let external_projections_path = artifact_path.join("external_projections");
         let package_dir_path = artifact_path.join("AppX");
+        let package_path = artifact_path.join(format!("{}.appx", &config.name));
+        let cert_path = artifact_path.join("cert.pfx");
         fs::create_dir_all(&objs_path)?;
         fs::create_dir_all(&unmerged_winmds_path)?;
         fs::create_dir_all(&merged_winmds_path)?;
@@ -360,6 +409,10 @@ impl<'a> BuildEnvironment<'a> {
             generated_sources_path,
             external_projections_path,
             package_dir_path,
+            package_path,
+            cert_path,
+
+            signing_password: String::from("my password"),
 
             file_edit_times: HashMap::new(),
         })
@@ -392,6 +445,10 @@ impl<'a> BuildEnvironment<'a> {
             BuildError::MergedWinMDError => println!("unable to merge Windows metadata (winmd) files."),
             BuildError::NugetError => println!("unable to fetch nuget dependencies."),
             BuildError::PackagingError => println!("unable to create appx package."),
+            BuildError::CreateCertificateError => println!("unable to create certificate."),
+            BuildError::RetrieveCertificateError => println!("unable to retrieve certificate."),
+            BuildError::CertExportError => println!("unable to export certificate."),
+            BuildError::SigningError => println!("unable to sign package."),
 
             BuildError::IoError(io_error) => println!("there was an io error: {:?}.", io_error.kind()),
         }
@@ -489,6 +546,8 @@ impl<'a> BuildEnvironment<'a> {
         ];
         self.copy_to_package_dir(package_file_paths)?;
         self.create_package()?;
+        self.export_cert()?;
+        self.sign_package()?;
         Ok(())
     }
 
@@ -792,6 +851,90 @@ impl<'a> BuildEnvironment<'a> {
             BuildError::PackagingError,
         )
     }
+
+    fn create_cert(&self) -> Result<String, BuildError> {
+        let result = run_ps_cmd_for_result(
+            "New-SelfSignedCertificate",
+            IntoIter::new([
+                "-Type", "Custom",
+                "-Subject", "CN=zachr",
+                "-KeyUsage", "DigitalSignature",
+                "-FriendlyName", "Zach Wolfe",
+                "-CertStoreLocation", r"Cert:\CurrentUser\My",
+                "-TextExtension", r#"@("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")"#,
+            ]),
+            BuildError::CreateCertificateError,
+        )?;
+
+        // TODO: This is a terrible hack!!!
+        let unexpected_format = "Unexpected format in output of New-SelfSignedCertificate command";
+        let thumbprint = result
+            .lines().nth(6).expect(unexpected_format)
+            .split_whitespace().next().expect(unexpected_format);
+
+        Ok(thumbprint.to_owned())
+    }
+
+    fn get_cert(&self) -> Result<String, BuildError> {
+        let result = run_ps_cmd_for_result(
+            "Set-Location",
+            &[r"Cert:\CurrentUser\My;", "Get-ChildItem", "|", "Format-Table", "Subject,", "Thumbprint"],
+            BuildError::RetrieveCertificateError,
+        )?;
+
+        let lines: Vec<_> = result.lines().collect();
+        // TODO: This is a terrible hack!!!
+        let unexpected_format = "Unexpected format in output of Get-ChildItem command";
+        let thumbprint_column_name = lines[1].split_whitespace().nth(1).expect(unexpected_format);
+        let thumbprint_offset = thumbprint_column_name.as_ptr() as usize - lines[1].as_ptr() as usize;
+        for &line in &lines[3..] {
+            if thumbprint_offset > line.len() { continue; }
+            let (subject, cur_thumbprint) = line.split_at(thumbprint_offset);
+            let subject = subject.trim_end();
+            let cur_thumbprint = cur_thumbprint.trim_end();
+            if subject == "CN=zachr" {
+                return Ok(cur_thumbprint.to_owned());
+            }
+        }
+        self.create_cert()
+    }
+
+    fn export_cert(&self) -> Result<(), BuildError> {
+        let thumbprint = self.get_cert()?;
+        let output_path = self.artifact_path.join("cert.pfx");
+        let _result = run_ps_cmd_for_result(
+            "$password = ConvertTo-SecureString",
+            &[
+                "-String".into(), OsString::from(&self.signing_password),
+                "-Force".into(),
+                "-AsPlainText;".into(),
+
+                "Export-PfxCertificate".into(),
+                "-cert".into(), format!(r"Cert:\CurrentUser\My\{}", thumbprint).into(),
+                "-FilePath".into(), output_path.as_os_str().to_owned(),
+                "-Password".into(), "$password".into(),
+            ],
+            BuildError::CertExportError
+        )?;
+
+        Ok(())
+    }
+
+    fn sign_package(&self) -> Result<(), BuildError> {
+        run_cmd(
+            &self.toolchain_paths.signtool_path,
+            &[
+                "sign".into(),
+                "/fd".into(), "SHA256".into(),
+
+                "/a".into(),
+                "/p".into(), OsString::from(&self.signing_password),
+                "/f".into(), self.cert_path.as_os_str().to_owned(),
+                self.package_path.as_os_str().to_owned(),
+            ],
+            BuildError::SigningError,
+        )
+    }
 }
 
 fn get_nuget_path() -> &'static Path {
@@ -1037,6 +1180,7 @@ impl ToolchainPaths {
         let midl_path = path.join("midl.exe");
         let mdmerge_path = path.join("mdmerge.exe");
         let makeappx_path = path.join("makeappx.exe");
+        let signtool_path = path.join("signtool.exe");
 
         Ok(
             ToolchainPaths {
@@ -1053,6 +1197,7 @@ impl ToolchainPaths {
                 midl_path,
                 mdmerge_path,
                 makeappx_path,
+                signtool_path,
             }
         )
     }
