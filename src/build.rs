@@ -532,11 +532,11 @@ impl<'a> BuildEnvironment<'a> {
         )?;
         let package_file_paths = vec![
             artifact_path.as_ref().join(format!("{}.exe", self.config.name)),
+            self.src_dir_path.join("AppxManifest.xml"),
 
             // TODO: this is a horrible hack!
             r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Images".into(),
             r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\WinUITest".into(),
-            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\AppxManifest.xml".into(),
             r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ApplicationModel.Resources.winmd".into(),
             r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.Internal.FrameworkUdk.dll".into(),
             r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ui.xaml.dll".into(),
