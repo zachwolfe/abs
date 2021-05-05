@@ -448,7 +448,7 @@ impl<'a> BuildEnvironment<'a> {
     fn should_build_artifacts_impl(
         &mut self,
         dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>,
-        artifact_paths: impl IntoIterator<Item=impl AsRef<Path>>,
+        artifact_paths: impl IntoIterator<Item=impl AsRef<Path>> + Clone,
         mut filter: impl FnMut(&Path) -> bool,
     ) -> io::Result<bool> {
         // TODO: shouldn't really be necessary to collect in a Vec here.
@@ -458,7 +458,7 @@ impl<'a> BuildEnvironment<'a> {
         let dependencies = dependencies?;
         let newest_dependency = dependencies.into_iter().max().unwrap_or(0u64);
 
-        let artifacts: Result<Vec<_>, _> = artifact_paths.into_iter()
+        let artifacts: Result<Vec<_>, _> = artifact_paths.clone().into_iter()
             .filter(|path|
                 filter(path.as_ref())
             )
@@ -467,10 +467,19 @@ impl<'a> BuildEnvironment<'a> {
         let artifacts = artifacts?;
         let oldest_artifact = artifacts.into_iter().min().unwrap_or(0u64);
 
-        Ok(newest_dependency > oldest_artifact)
+        let should_build_artifacts = newest_dependency > oldest_artifact;
+
+        // Invalidate edit times of all artifact paths
+        if should_build_artifacts {
+            for artifact in artifact_paths {
+                self.file_edit_times.remove(artifact.as_ref());
+            }
+        }
+
+        Ok(should_build_artifacts)
     }
 
-    fn should_build_artifact(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path>) -> io::Result<bool> {
+    fn should_build_artifact(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path> + Clone) -> io::Result<bool> {
         self.should_build_artifacts_impl(dependency_paths, IntoIter::new([artifact_path]), |_| true)
     }
 
