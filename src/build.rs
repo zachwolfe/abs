@@ -66,12 +66,7 @@ pub enum BuildError {
     CppWinRtError,
     MergedWinMDError,
     IdlError,
-    PackagingError,
     NugetError,
-    CreateCertificateError,
-    RetrieveCertificateError,
-    CertExportError,
-    SigningError,
 
     IoError(io::Error),
 }
@@ -444,11 +439,6 @@ impl<'a> BuildEnvironment<'a> {
             BuildError::IdlError => println!("there was a midl error."),
             BuildError::MergedWinMDError => println!("unable to merge Windows metadata (winmd) files."),
             BuildError::NugetError => println!("unable to fetch nuget dependencies."),
-            BuildError::PackagingError => println!("unable to create appx package."),
-            BuildError::CreateCertificateError => println!("unable to create certificate."),
-            BuildError::RetrieveCertificateError => println!("unable to retrieve certificate."),
-            BuildError::CertExportError => println!("unable to export certificate."),
-            BuildError::SigningError => println!("unable to sign package."),
 
             BuildError::IoError(io_error) => println!("there was an io error: {:?}.", io_error.kind()),
         }
@@ -545,9 +535,6 @@ impl<'a> BuildEnvironment<'a> {
             r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
         ];
         self.copy_to_package_dir(package_file_paths)?;
-        self.create_package()?;
-        self.export_cert()?;
-        self.sign_package()?;
         Ok(())
     }
 
@@ -771,7 +758,9 @@ impl<'a> BuildEnvironment<'a> {
         args.push("/I".into());
         args.push(self.external_projections_path.as_os_str().to_owned());
         args.push(path.as_os_str().to_owned());
-        run_cmd(&self.toolchain_paths.compiler_path, &args, BuildError::CompilerError)
+        run_cmd(&self.toolchain_paths.compiler_path, &args, BuildError::CompilerError)?;
+
+        Ok(())
     }
 
     pub fn link(
@@ -835,105 +824,6 @@ impl<'a> BuildEnvironment<'a> {
         fs::remove_dir_all(&package_dir_path)?;
         fs::create_dir_all(&package_dir_path)?;
         self.copy_to_package_dir_recursive(file_paths, package_dir_path)
-    }
-
-    fn create_package(&mut self) -> Result<(), BuildError> {
-        run_cmd(
-            &self.toolchain_paths.makeappx_path,
-            &[
-                "pack".into(),
-                "/o".into(),
-                "/d".into(),
-                self.package_dir_path.as_os_str().to_os_string(),
-                "/p".into(),
-                self.artifact_path.join(format!("{}.appx", &self.config.name)).as_os_str().to_os_string(),
-            ],
-            BuildError::PackagingError,
-        )
-    }
-
-    fn create_cert(&self) -> Result<String, BuildError> {
-        let result = run_ps_cmd_for_result(
-            "New-SelfSignedCertificate",
-            IntoIter::new([
-                "-Type", "Custom",
-                "-Subject", "CN=zachr",
-                "-KeyUsage", "DigitalSignature",
-                "-FriendlyName", "Zach Wolfe",
-                "-CertStoreLocation", r"Cert:\CurrentUser\My",
-                "-TextExtension", r#"@("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")"#,
-            ]),
-            BuildError::CreateCertificateError,
-        )?;
-
-        // TODO: This is a terrible hack!!!
-        let unexpected_format = "Unexpected format in output of New-SelfSignedCertificate command";
-        let thumbprint = result
-            .lines().nth(6).expect(unexpected_format)
-            .split_whitespace().next().expect(unexpected_format);
-
-        Ok(thumbprint.to_owned())
-    }
-
-    fn get_cert(&self) -> Result<String, BuildError> {
-        let result = run_ps_cmd_for_result(
-            "Set-Location",
-            &[r"Cert:\CurrentUser\My;", "Get-ChildItem", "|", "Format-Table", "Subject,", "Thumbprint"],
-            BuildError::RetrieveCertificateError,
-        )?;
-
-        let lines: Vec<_> = result.lines().collect();
-        // TODO: This is a terrible hack!!!
-        let unexpected_format = "Unexpected format in output of Get-ChildItem command";
-        let thumbprint_column_name = lines[1].split_whitespace().nth(1).expect(unexpected_format);
-        let thumbprint_offset = thumbprint_column_name.as_ptr() as usize - lines[1].as_ptr() as usize;
-        for &line in &lines[3..] {
-            if thumbprint_offset > line.len() { continue; }
-            let (subject, cur_thumbprint) = line.split_at(thumbprint_offset);
-            let subject = subject.trim_end();
-            let cur_thumbprint = cur_thumbprint.trim_end();
-            if subject == "CN=zachr" {
-                return Ok(cur_thumbprint.to_owned());
-            }
-        }
-        self.create_cert()
-    }
-
-    fn export_cert(&self) -> Result<(), BuildError> {
-        let thumbprint = self.get_cert()?;
-        let output_path = self.artifact_path.join("cert.pfx");
-        let _result = run_ps_cmd_for_result(
-            "$password = ConvertTo-SecureString",
-            &[
-                "-String".into(), OsString::from(&self.signing_password),
-                "-Force".into(),
-                "-AsPlainText;".into(),
-
-                "Export-PfxCertificate".into(),
-                "-cert".into(), format!(r"Cert:\CurrentUser\My\{}", thumbprint).into(),
-                "-FilePath".into(), output_path.as_os_str().to_owned(),
-                "-Password".into(), "$password".into(),
-            ],
-            BuildError::CertExportError
-        )?;
-
-        Ok(())
-    }
-
-    fn sign_package(&self) -> Result<(), BuildError> {
-        run_cmd(
-            &self.toolchain_paths.signtool_path,
-            &[
-                "sign".into(),
-                "/fd".into(), "SHA256".into(),
-
-                "/a".into(),
-                "/p".into(), OsString::from(&self.signing_password),
-                "/f".into(), self.cert_path.as_os_str().to_owned(),
-                self.package_path.as_os_str().to_owned(),
-            ],
-            BuildError::SigningError,
-        )
     }
 }
 
