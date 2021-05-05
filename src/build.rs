@@ -56,10 +56,13 @@ pub struct BuildEnvironment<'a> {
 pub enum BuildError {
     NoSrcDirectory,
     CantReadSrcDirectory,
-    CompilerError { stdout: String },
-    LinkerError { stdout: String },
+    CompilerError,
+    LinkerError,
     CppWinRtError,
+    MergedWinMDError,
     IdlError,
+    PackagingError,
+    NugetError,
 
     IoError(io::Error),
 }
@@ -169,6 +172,19 @@ impl DependencyBuilder {
     }
 
     fn build(self) -> Vec<PathBuf> { self.dependencies }
+}
+
+fn run_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, error: BuildError) -> Result<(), BuildError> {
+    let code = Command::new(cmd)
+        .args(args)
+        .spawn()?
+        .wait()?;
+
+    if code.success() {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -369,10 +385,13 @@ impl<'a> BuildEnvironment<'a> {
         match error {
             BuildError::NoSrcDirectory => println!("src directory does not exist."),
             BuildError::CantReadSrcDirectory => println!("unable to read src directory."),
-            BuildError::CompilerError { stdout } => print!("unable to compile {}", stdout),
-            BuildError::LinkerError { stdout } => print!("unable to link {}", stdout),
+            BuildError::CompilerError => println!("unable to compile."),
+            BuildError::LinkerError => println!("unable to link."),
             BuildError::CppWinRtError => println!("there was a cppwinrt error."),
             BuildError::IdlError => println!("there was a midl error."),
+            BuildError::MergedWinMDError => println!("unable to merge Windows metadata (winmd) files."),
+            BuildError::NugetError => println!("unable to fetch nuget dependencies."),
+            BuildError::PackagingError => println!("unable to create appx package."),
 
             BuildError::IoError(io_error) => println!("there was an io error: {:?}.", io_error.kind()),
         }
@@ -446,7 +465,7 @@ impl<'a> BuildEnvironment<'a> {
             let gen_pch_path = self.get_artifact_path(&pch_path, &self.objs_path, "pch");
             if self.should_build_artifact(dependencies.build(), &gen_pch_path)? {
                 println!("Generating pre-compiled header");
-                print!("Compiled {}", self.compile(pch_path, &self.objs_path, PchOption::GeneratePch)?);
+                self.compile(pch_path, &self.objs_path, PchOption::GeneratePch)?;
             }
         };
         self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths, pch)?;
@@ -553,13 +572,7 @@ impl<'a> BuildEnvironment<'a> {
 
         let merged_path = self.merged_winmds_path.join(&format!("{}.winmd", &self.config.name));
         if self.should_build_artifact(dependencies.build(), &merged_path)? {
-            let code = Command::new(&self.toolchain_paths.mdmerge_path)
-                .args(args)
-                .spawn()
-                .unwrap()
-                .wait()
-                .unwrap();
-            assert!(code.success());
+            run_cmd(&self.toolchain_paths.mdmerge_path, args, BuildError::MergedWinMDError)?;
         }
 
         let references = self.toolchain_paths.winmd_paths.iter().cloned();
@@ -584,32 +597,21 @@ impl<'a> BuildEnvironment<'a> {
             }
             args.extend(IntoIter::new(["-in".into(), merged_path.as_os_str().to_os_string()]));
             
-            self.cppwinrt(args)
+            run_cmd(&self.toolchain_paths.cppwinrt_path, args, BuildError::CppWinRtError)
         } else {
             Ok(())
-        }
-    }
-
-    fn cppwinrt(&self, args: impl IntoIterator<Item=impl AsRef<OsStr>>) -> Result<(), BuildError> {
-        let code = Command::new(&self.toolchain_paths.cppwinrt_path)
-            .args(args)
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
-
-        if code.success() {
-            Ok(())
-        } else {
-            Err(BuildError::CppWinRtError)
         }
     }
 
     fn project_winmd(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>) -> Result<(), BuildError> {
-        self.cppwinrt(&[
-            OsStr::new("-input"), path.as_ref().as_os_str(),
-            OsStr::new("-output"), output_path.as_ref().as_os_str(),
-        ])
+        run_cmd(
+            &self.toolchain_paths.cppwinrt_path,
+            &[
+                OsStr::new("-input"), path.as_ref().as_os_str(),
+                OsStr::new("-output"), output_path.as_ref().as_os_str(),
+            ],
+            BuildError::CppWinRtError,
+        )
     }
 
     fn project_winmd_with_references(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>, references: impl IntoIterator<Item=impl AsRef<OsStr>>) -> Result<(), BuildError> {
@@ -621,7 +623,7 @@ impl<'a> BuildEnvironment<'a> {
             args.push("-reference".into());
             args.push(reference.as_ref().to_owned());
         }
-        self.cppwinrt(args)
+        run_cmd(&self.toolchain_paths.cppwinrt_path, args, BuildError::CppWinRtError)
     }
 
     fn project_winsdk(&mut self) -> Result<(), BuildError> {
@@ -663,7 +665,7 @@ impl<'a> BuildEnvironment<'a> {
                 let mut obj_subdir_path = obj_path;
                 obj_subdir_path.pop();
                 fs::create_dir_all(&obj_subdir_path).unwrap();
-                print!("Compiled {}", self.compile(path, &self.objs_path, pch_option)?);
+                self.compile(path, &self.objs_path, pch_option)?;
             }
         }
 
@@ -674,7 +676,7 @@ impl<'a> BuildEnvironment<'a> {
         Ok(())
     }
 
-    fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<String, BuildError> {
+    fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
         let mut args = self.compiler_flags.clone();
         let path = path.as_ref();
 
@@ -710,16 +712,7 @@ impl<'a> BuildEnvironment<'a> {
         args.push("/I".into());
         args.push(self.external_projections_path.as_os_str().to_owned());
         args.push(path.as_os_str().to_owned());
-        let output = Command::new(&self.toolchain_paths.compiler_path)
-            .args(&args)
-            .output()
-            .expect("failed to execute process");
-        let stdout = std::str::from_utf8(&output.stdout).unwrap().to_string();
-        if output.status.success() {
-            Ok(stdout)
-        } else {
-            Err(BuildError::CompilerError { stdout })
-        }
+        run_cmd(&self.toolchain_paths.compiler_path, &args, BuildError::CompilerError)
     }
 
     pub fn link(
@@ -750,16 +743,10 @@ impl<'a> BuildEnvironment<'a> {
             for path in &self.config.link_libraries {
                 args.push(path.into());
             }
-            let output = Command::new(&self.toolchain_paths.linker_path)
-                .args(&args)
-                .output()
-                .expect("failed to execute process");
-            let stdout = std::str::from_utf8(&output.stdout).unwrap().to_string();
-            if !output.status.success() {
-                return Err(BuildError::LinkerError { stdout });
-            }
+            run_cmd(&self.toolchain_paths.linker_path, &args, BuildError::LinkerError)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     fn copy_to_package_dir_recursive(&mut self, file_paths: impl IntoIterator<Item=impl AsRef<Path>>, output: impl AsRef<Path>) -> Result<(), BuildError> {
@@ -792,21 +779,18 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     fn create_package(&mut self) -> Result<(), BuildError> {
-        let code = Command::new(&self.toolchain_paths.makeappx_path)
-            .args(&[
+        run_cmd(
+            &self.toolchain_paths.makeappx_path,
+            &[
                 "pack".into(),
                 "/o".into(),
                 "/d".into(),
                 self.package_dir_path.as_os_str().to_os_string(),
                 "/p".into(),
                 self.artifact_path.join(format!("{}.appx", &self.config.name)).as_os_str().to_os_string(),
-            ])
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
-        assert!(code.success());
-        Ok(())
+            ],
+            BuildError::PackagingError,
+        )
     }
 }
 
@@ -843,7 +827,7 @@ fn find_nuget_package(name: &str, packages_path: impl AsRef<Path>) -> Option<Pat
         )
 }
 
-fn download_nuget_deps(deps: &[&str]) -> Vec<PathBuf> {
+fn download_nuget_deps(deps: &[&str]) -> Result<Vec<PathBuf>, BuildError> {
     let nuget_path = get_nuget_path();
     let packages_path = nuget_path.parent().unwrap();
     let mut paths = Vec::new();
@@ -853,23 +837,19 @@ fn download_nuget_deps(deps: &[&str]) -> Vec<PathBuf> {
             continue;
         }
         println!("Installing {}...", dep);
-        let status = Command::new(nuget_path)
-            .args(
-                &[
-                    "install".into(),
-                    "-OutputDirectory".into(),
-                    nuget_path.parent().unwrap().to_owned(),
-                    dep.into(),
-                ]
-            )
-                .spawn()
-                .unwrap()
-                .wait()
-                .unwrap();
-        assert!(status.success());
+        run_cmd(
+            nuget_path,
+            &[
+                "install".into(),
+                "-OutputDirectory".into(),
+                nuget_path.parent().unwrap().to_owned(),
+                dep.into(),
+            ],
+            BuildError::NugetError,
+        )?;
         paths.push(find_nuget_package(dep, packages_path).unwrap());
     }
-    paths
+    Ok(paths)
 }
 
 fn parse_version<const N: usize>(version: &str) -> Option<[u64; N]> {
@@ -916,8 +896,8 @@ fn newest_version<P: AsRef<Path>, const N: usize>(parent: P) -> Option<PathBuf> 
 }
 
 impl ToolchainPaths {
-    pub fn find() -> io::Result<ToolchainPaths> {
-        let dependency_paths = download_nuget_deps(&["Microsoft.Windows.CppWinRT", "Microsoft.ProjectReunion", "Microsoft.ProjectReunion.WinUI", "Microsoft.ProjectReunion.Foundation"]);
+    pub fn find() -> Result<ToolchainPaths, BuildError> {
+        let dependency_paths = download_nuget_deps(&["Microsoft.Windows.CppWinRT", "Microsoft.ProjectReunion", "Microsoft.ProjectReunion.WinUI", "Microsoft.ProjectReunion.Foundation"])?;
         let mut winmd_paths = Vec::new();
         let mut include_paths = Vec::new();
         for md_path in &dependency_paths[2..3] {
