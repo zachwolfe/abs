@@ -142,11 +142,11 @@ int main() {{
         },
     };
 
+    let mut run_path = PathBuf::from(&config.name);
+    run_path.set_extension("exe");
     match options.sub_command {
         Subcommand::Run(_) => {
-            artifact_path.push(&config.name);
-            artifact_path.set_extension("exe");
-            Command::new(artifact_path)
+            Command::new(run_path)
                 .spawn()
                 .unwrap()
                 .wait()
@@ -154,10 +154,8 @@ int main() {{
         },
         Subcommand::Debug(_) => {
             kill_debugger();
-            artifact_path.push(&config.name);
-            artifact_path.set_extension("exe");
             Command::new(&toolchain_paths.debugger_path)
-                .args(&[OsStr::new("/debugexe"), artifact_path.as_os_str()])
+                .args(&[OsStr::new("/debugexe"), run_path.as_os_str()])
                 .spawn()
                 .unwrap();
         },

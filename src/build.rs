@@ -67,6 +67,7 @@ pub enum BuildError {
     MergedWinMDError,
     IdlError,
     NugetError,
+    InstallError,
 
     IoError(io::Error),
 }
@@ -439,6 +440,7 @@ impl<'a> BuildEnvironment<'a> {
             BuildError::IdlError => println!("there was a midl error."),
             BuildError::MergedWinMDError => println!("unable to merge Windows metadata (winmd) files."),
             BuildError::NugetError => println!("unable to fetch nuget dependencies."),
+            BuildError::InstallError => println!("unable to install package."),
 
             BuildError::IoError(io_error) => println!("there was an io error: {:?}.", io_error.kind()),
         }
@@ -544,6 +546,7 @@ impl<'a> BuildEnvironment<'a> {
             r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
         ];
         self.copy_to_package_dir(package_file_paths)?;
+        self.install_package()?;
         Ok(())
     }
 
@@ -833,6 +836,10 @@ impl<'a> BuildEnvironment<'a> {
         fs::remove_dir_all(&package_dir_path)?;
         fs::create_dir_all(&package_dir_path)?;
         self.copy_to_package_dir_recursive(file_paths, package_dir_path)
+    }
+
+    fn install_package(&mut self) -> Result<(), BuildError> {
+        run_ps_cmd("Add-AppxPackage", &["-Register".into(), self.package_dir_path.join("AppxManifest.xml")], BuildError::InstallError)
     }
 }
 
