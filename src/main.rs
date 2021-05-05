@@ -49,7 +49,7 @@ fn main() {
             _task_failed!();
         }}
     }
-    let (config, toolchain_paths, mut artifact_path) = match &options.sub_command {
+    let (config, toolchain_paths) = match &options.sub_command {
         Subcommand::Init { project_root } => {
             let project_root: Cow<Path> = project_root.as_ref()
                 .map(|path| Cow::from(path.as_path()))
@@ -121,7 +121,7 @@ int main() {{
             }
 
             println!("Build succeeded.");
-            (config, toolchain_paths, artifact_path)
+            (config, toolchain_paths)
         },
         Subcommand::Clean => {
             for mode in ["debug", "release"].iter() {

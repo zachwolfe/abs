@@ -42,17 +42,12 @@ pub struct BuildEnvironment<'a> {
     toolchain_paths: &'a ToolchainPaths,
     config: &'a ProjectConfig,
     src_dir_path: PathBuf,
-    artifact_path: PathBuf,
     objs_path: PathBuf,
     unmerged_winmds_path: PathBuf,
     merged_winmds_path: PathBuf,
     generated_sources_path: PathBuf,
     external_projections_path: PathBuf,
     package_dir_path: PathBuf,
-    package_path: PathBuf,
-    cert_path: PathBuf,
-
-    signing_password: String,
 
     file_edit_times: HashMap<PathBuf, u64>,
 }
@@ -192,18 +187,6 @@ fn run_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr
     }
 }
 
-fn run_cmd_for_result(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, error: BuildError) -> Result<String, BuildError> {
-    let output = Command::new(cmd)
-        .args(args)
-        .output()?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(error)
-    }
-}
-
 fn get_ps_args(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>) -> impl IntoIterator<Item=impl AsRef<OsStr>> {
     let mut command = cmd.as_ref().to_owned();
     for arg in args {
@@ -220,10 +203,6 @@ fn get_ps_args(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<O
         }
     }
     IntoIter::new(["-command".into(), command])
-}
-
-fn run_ps_cmd_for_result(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, error: BuildError) -> Result<String, BuildError> {
-    run_cmd_for_result("powershell", get_ps_args(cmd, args), error)
 }
 
 fn run_ps_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, error: BuildError) -> Result<(), BuildError> {
@@ -378,8 +357,6 @@ impl<'a> BuildEnvironment<'a> {
         let generated_sources_path = artifact_path.join("generated_sources");
         let external_projections_path = artifact_path.join("external_projections");
         let package_dir_path = artifact_path.join("AppX");
-        let package_path = artifact_path.join(format!("{}.appx", &config.name));
-        let cert_path = artifact_path.join("cert.pfx");
         fs::create_dir_all(&objs_path)?;
         fs::create_dir_all(&unmerged_winmds_path)?;
         fs::create_dir_all(&merged_winmds_path)?;
@@ -398,17 +375,12 @@ impl<'a> BuildEnvironment<'a> {
             toolchain_paths,
             config,
             src_dir_path: "src".into(),
-            artifact_path,
             objs_path,
             unmerged_winmds_path,
             merged_winmds_path,
             generated_sources_path,
             external_projections_path,
             package_dir_path,
-            package_path,
-            cert_path,
-
-            signing_password: String::from("my password"),
 
             file_edit_times: HashMap::new(),
         })
@@ -527,26 +499,37 @@ impl<'a> BuildEnvironment<'a> {
             }
         };
         self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths, pch)?;
-        self.link(
-            &self.config.name,
-            &artifact_path,
-            obj_paths,
-        )?;
-        let package_file_paths = vec![
-            artifact_path.as_ref().join(format!("{}.exe", self.config.name)),
-            self.src_dir_path.join("AppxManifest.xml"),
 
-            // TODO: this is a horrible hack!
-            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Images".into(),
-            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\WinUITest".into(),
-            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ApplicationModel.Resources.winmd".into(),
-            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.Internal.FrameworkUdk.dll".into(),
-            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ui.xaml.dll".into(),
-            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\resources.pri".into(),
-            r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
-        ];
-        self.copy_to_package_dir(package_file_paths)?;
-        self.install_package()?;
+
+        let exe_path = artifact_path.as_ref().join(format!("{}.exe", self.config.name));
+        
+        let dependencies: Vec<_> = obj_paths.clone().iter().cloned()
+            .chain(self.linker_lib_dependencies.iter().cloned())
+            .collect();
+        let should_relink = self.should_build_artifact(&dependencies, &exe_path)?;
+        if should_relink {
+            self.link(&exe_path, obj_paths)?;
+        }
+
+        let manifest_src_path = self.src_dir_path.join("AppxManifest.xml");
+        let manifest_output_path = self.package_dir_path.join("AppxManifest.xml");
+        if should_relink || self.should_build_artifact(&[&manifest_src_path], &manifest_output_path)? {
+            let package_file_paths = vec![
+                artifact_path.as_ref().join(format!("{}.exe", self.config.name)),
+                manifest_src_path.clone(),
+    
+                // TODO: this is a horrible hack!
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Images".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\WinUITest".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ApplicationModel.Resources.winmd".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.Internal.FrameworkUdk.dll".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ui.xaml.dll".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\resources.pri".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
+            ];
+            self.copy_to_package_dir(package_file_paths)?;
+            self.install_package()?;
+        }
         Ok(())
     }
 
@@ -777,36 +760,24 @@ impl<'a> BuildEnvironment<'a> {
 
     pub fn link(
         &mut self,
-        project_name: &str,
         output_path: impl AsRef<Path>,
         obj_paths: impl IntoIterator<Item=impl AsRef<Path>> + Clone,
     ) -> Result<(), BuildError> {
+        println!("Linking {}...", output_path.as_ref().to_string_lossy());
         let mut args = self.linker_flags.clone();
-        let mut output_path = output_path.as_ref().to_owned();
-        output_path.push(project_name);
-        output_path.set_extension("exe");
-
-        let dependencies: Vec<_> = obj_paths.clone().into_iter().map(|path| path.as_ref().to_owned())
-            .chain(self.linker_lib_dependencies.iter().cloned())
-            .collect();
-        if self.should_build_artifact(dependencies, &output_path)? {
-            println!("Linking {}...", output_path.to_string_lossy());
-            args.push(
-                cmd_flag(
-                    "/out:",
-                    output_path,
-                )
-            );
-            for path in obj_paths {
-                args.push(path.as_ref().as_os_str().to_owned());
-            }
-            for path in &self.config.link_libraries {
-                args.push(path.into());
-            }
-            run_cmd(&self.toolchain_paths.linker_path, &args, BuildError::LinkerError)
-        } else {
-            Ok(())
+        args.push(
+            cmd_flag(
+                "/out:",
+                output_path.as_ref(),
+            )
+        );
+        for path in obj_paths {
+            args.push(path.as_ref().as_os_str().to_owned());
         }
+        for path in &self.config.link_libraries {
+            args.push(path.into());
+        }
+        run_cmd(&self.toolchain_paths.linker_path, &args, BuildError::LinkerError)
     }
 
     fn copy_to_package_dir_recursive(&mut self, file_paths: impl IntoIterator<Item=impl AsRef<Path>>, output: impl AsRef<Path>) -> Result<(), BuildError> {
