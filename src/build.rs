@@ -42,6 +42,7 @@ pub struct BuildEnvironment<'a> {
     toolchain_paths: &'a ToolchainPaths,
     config: &'a ProjectConfig,
     src_dir_path: PathBuf,
+    assets_dir_path: PathBuf,
     objs_path: PathBuf,
     unmerged_winmds_path: PathBuf,
     merged_winmds_path: PathBuf,
@@ -375,6 +376,7 @@ impl<'a> BuildEnvironment<'a> {
             toolchain_paths,
             config,
             src_dir_path: "src".into(),
+            assets_dir_path: "assets".into(),
             objs_path,
             unmerged_winmds_path,
             merged_winmds_path,
@@ -501,7 +503,8 @@ impl<'a> BuildEnvironment<'a> {
         self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths, pch)?;
 
 
-        let exe_path = artifact_path.as_ref().join(format!("{}.exe", self.config.name));
+        let exe_name = format!("{}.exe", self.config.name);
+        let exe_path = artifact_path.as_ref().join(&exe_name);
         
         let dependencies: Vec<_> = obj_paths.clone().iter().cloned()
             .chain(self.linker_lib_dependencies.iter().cloned())
@@ -513,9 +516,11 @@ impl<'a> BuildEnvironment<'a> {
 
         let manifest_src_path = self.src_dir_path.join("AppxManifest.xml");
         let manifest_output_path = self.package_dir_path.join("AppxManifest.xml");
+        super::kill_debugger();
+        super::kill_process(&exe_name);
         if should_relink || self.should_build_artifact(&[&manifest_src_path], &manifest_output_path)? {
-            let package_file_paths = vec![
-                artifact_path.as_ref().join(format!("{}.exe", self.config.name)),
+            let mut package_file_paths = vec![
+                artifact_path.as_ref().join(&exe_name),
                 manifest_src_path.clone(),
     
                 // TODO: this is a horrible hack!
@@ -527,6 +532,9 @@ impl<'a> BuildEnvironment<'a> {
                 r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\resources.pri".into(),
                 r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
             ];
+            if fs::metadata(&self.assets_dir_path)?.is_dir() {
+                package_file_paths.push(self.assets_dir_path.clone());
+            }
             self.copy_to_package_dir(package_file_paths)?;
             self.install_package()?;
         }

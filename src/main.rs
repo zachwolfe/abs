@@ -16,11 +16,14 @@ use proj_config::{ProjectConfig, OutputType, Host, CxxOptions};
 use cmd_options::{CmdOptions, CompileMode, Subcommand};
 use build::{BuildEnvironment, ToolchainPaths};
 
+pub fn kill_process(path: impl AsRef<Path>) {
+    let _output = Command::new("taskkill")
+        .args(&[OsStr::new("/F"), OsStr::new("/IM"), path.as_ref().as_os_str()])
+        .output();
+}
 
 fn kill_debugger() {
-    let _output = Command::new("taskkill")
-        .args(&["/IM", "devenv.exe", "/F"])
-        .output();
+    kill_process("devenv.exe");
 }
 
 fn main() {
@@ -146,11 +149,16 @@ int main() {{
     run_path.set_extension("exe");
     match options.sub_command {
         Subcommand::Run(_) => {
-            Command::new(run_path)
+            let mut child = Command::new(run_path)
                 .spawn()
-                .unwrap()
-                .wait()
                 .unwrap();
+            match config.output_type {
+                OutputType::ConsoleApp => {
+                    // Only wait for the process to complete if this is a console app
+                    child.wait().unwrap();
+                },
+                OutputType::GuiApp => {}
+            }
         },
         Subcommand::Debug(_) => {
             kill_debugger();
