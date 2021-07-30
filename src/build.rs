@@ -52,7 +52,7 @@ pub struct BuildEnvironment<'a> {
     merged_winmds_path: PathBuf,
     generated_sources_path: PathBuf,
     external_projections_path: PathBuf,
-    package_dir_path: PathBuf,
+    pub package_dir_path: PathBuf,
 
     file_edit_times: HashMap<PathBuf, u64>,
 }

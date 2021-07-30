@@ -52,7 +52,7 @@ fn main() {
             _task_failed!();
         }}
     }
-    let (config, toolchain_paths) = match &options.sub_command {
+    let (config, package_dir_path, toolchain_paths) = match &options.sub_command {
         Subcommand::Init { project_root } => {
             let project_root: Cow<Path> = project_root.as_ref()
                 .map(|path| Cow::from(path.as_path()))
@@ -124,7 +124,8 @@ int main() {{
             }
 
             println!("Build succeeded.");
-            (config, toolchain_paths)
+            let package_dir_path = env.package_dir_path;
+            (config, package_dir_path, toolchain_paths)
         },
         Subcommand::Clean => {
             for mode in ["debug", "release"].iter() {
@@ -145,11 +146,12 @@ int main() {{
         },
     };
 
-    let mut run_path = PathBuf::from(&config.name);
+    let mut run_path = package_dir_path.join(&config.name);
     run_path.set_extension("exe");
     match options.sub_command {
         Subcommand::Run(_) => {
             let mut child = Command::new(run_path)
+                .current_dir(&package_dir_path)
                 .spawn()
                 .unwrap();
             match config.output_type {
