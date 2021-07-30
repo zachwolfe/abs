@@ -32,7 +32,7 @@ pub struct ToolchainPaths {
     pub include_paths: Vec<PathBuf>,
     pub lib_paths: Vec<PathBuf>,
 
-    pub win_ui_paths: WinUiPaths,
+    pub win_ui_paths: Option<WinUiPaths>,
 }
 
 pub struct BuildEnvironment<'a> {
@@ -309,7 +309,7 @@ impl<'a> BuildEnvironment<'a> {
         };
         let (midl_flags, midl_dependencies) = if config.output_type.is_win_ui() {
             // Assumption: unwrapping is safe here, because midl is only used when in WinUI mode
-            let win_ui_paths = &toolchain_paths.win_ui_paths;
+            let win_ui_paths = toolchain_paths.win_ui_paths.as_ref().unwrap();
             let mut flags = vec![
                 "/winrt".into(),
                 "/metadata_dir".into(),
@@ -582,7 +582,7 @@ impl<'a> BuildEnvironment<'a> {
             flags.push(winmd_path.as_os_str().to_os_string());
             flags.push(path.as_ref().as_os_str().to_owned());
             // Assumption: it's safe to unwrap here, because idl files are only supported in WinUI mode
-            let code = Command::new(&self.toolchain_paths.win_ui_paths.midl_path)
+            let code = Command::new(&self.toolchain_paths.win_ui_paths.as_ref().unwrap().midl_path)
                 .args(flags)
                 .env("PATH", self.toolchain_paths.compiler_path.parent().unwrap())
                 .spawn()
@@ -628,7 +628,7 @@ impl<'a> BuildEnvironment<'a> {
         ];
 
         // Assumption: it's safe to unwrap here, because idls are only supported in WinUI mode
-        let win_ui_paths = &self.toolchain_paths.win_ui_paths;
+        let win_ui_paths = self.toolchain_paths.win_ui_paths.as_ref().unwrap();
         for reference in &win_ui_paths.winmd_paths {
             args.push("/metadata_dir".into());
             args.push(reference.as_os_str().to_owned());
@@ -675,7 +675,7 @@ impl<'a> BuildEnvironment<'a> {
     fn project_winmd(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>) -> Result<(), BuildError> {
         run_cmd(
             // Assumption: it's safe to unwrap here, because WinMDs are only supported in WinUI mode
-            &self.toolchain_paths.win_ui_paths.cppwinrt_path,
+            &self.toolchain_paths.win_ui_paths.as_ref().unwrap().cppwinrt_path,
             &[
                 OsStr::new("-input"), path.as_ref().as_os_str(),
                 OsStr::new("-output"), output_path.as_ref().as_os_str(),
@@ -694,7 +694,7 @@ impl<'a> BuildEnvironment<'a> {
             args.push(reference.as_ref().to_owned());
         }
         // Assumption: it's safe to unwrap here, because WinMDs are only supported in WinUI mode
-        run_cmd(&self.toolchain_paths.win_ui_paths.cppwinrt_path, args, BuildError::CppWinRtError)
+        run_cmd(&self.toolchain_paths.win_ui_paths.as_ref().unwrap().cppwinrt_path, args, BuildError::CppWinRtError)
     }
 
     fn project_winsdk(&mut self) -> Result<(), BuildError> {
@@ -702,7 +702,7 @@ impl<'a> BuildEnvironment<'a> {
             .files_in_recursively(r"C:\Windows\System32\WinMetadata", "winmd")?;
 
         // Assumption: it's safe to unwrap here, because WinMDs are only supported in WinUI mode
-        let win_ui_paths = &self.toolchain_paths.win_ui_paths;
+        let win_ui_paths = self.toolchain_paths.win_ui_paths.as_ref().unwrap();
         for winmd_path in &win_ui_paths.winmd_paths {
             dependencies = dependencies.files_in_recursively(winmd_path, "winmd")?;
         }
@@ -1120,7 +1120,7 @@ impl ToolchainPaths {
                 include_paths,
                 lib_paths,
 
-                win_ui_paths: win_ui_paths.unwrap(),
+                win_ui_paths,
             }
         )
     }
