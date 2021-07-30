@@ -500,12 +500,16 @@ impl<'a> BuildEnvironment<'a> {
         let pch = paths.src_paths.iter().any(|path| path.file_name() == Some(OsStr::new("pch.cpp")));
         if pch {
             let pch_path = self.src_dir_path.join("pch.cpp");
-            let dependencies = DependencyBuilder::default()
+            let mut dependencies = DependencyBuilder::default()
                 .file(&pch_path)
-                .files(header_paths.clone())
-                .files_in(&self.generated_sources_path, "h")?
-                .files_in_recursively(&self.external_projections_path, "h")?;
-            
+                .files(header_paths.clone());
+
+            if self.config.output_type.is_win_ui() {
+                dependencies = dependencies
+                    .files_in(&self.generated_sources_path, "h")?
+                    .files_in_recursively(&self.external_projections_path, "h")?;
+            }
+
             let gen_pch_path = self.get_artifact_path(&pch_path, &self.objs_path, "pch");
             if self.should_build_artifact(dependencies.build(), &gen_pch_path)? {
                 println!("Generating pre-compiled header");
@@ -517,7 +521,7 @@ impl<'a> BuildEnvironment<'a> {
 
         let exe_name = format!("{}.exe", self.config.name);
         let exe_path = artifact_path.as_ref().join(&exe_name);
-        
+
         let dependencies: Vec<_> = obj_paths.clone().iter().cloned()
             .chain(self.linker_lib_dependencies.iter().cloned())
             .collect();
@@ -727,10 +731,13 @@ impl<'a> BuildEnvironment<'a> {
     ) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
-        let dependencies = DependencyBuilder::default()
-            .files(header_paths.clone())
-            .files_in(&self.generated_sources_path, "h")?
-            .files_in_recursively(&self.external_projections_path, "h")?;
+        let mut dependencies = DependencyBuilder::default()
+            .files(header_paths.clone());
+        if self.config.output_type.is_win_ui() {
+            dependencies = dependencies
+                .files_in(&self.generated_sources_path, "h")?
+                .files_in_recursively(&self.external_projections_path, "h")?;
+        }
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
             obj_paths.push(obj_path.clone());
