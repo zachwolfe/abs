@@ -12,13 +12,7 @@ use std::array::IntoIter;
 use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
 
-pub struct ToolchainPaths {
-    pub compiler_path: PathBuf,
-    pub linker_path: PathBuf,
-    pub debugger_path: PathBuf,
-    pub include_paths: Vec<PathBuf>,
-    pub lib_paths: Vec<PathBuf>,
-
+pub struct WinUiPaths {
     pub foundation_contract_path: PathBuf,
 
     /// The paths to WinMDs included in the downloaded Nuget packages, plus the UnionMetadata directory
@@ -29,6 +23,16 @@ pub struct ToolchainPaths {
     pub mdmerge_path: PathBuf,
     pub makeappx_path: PathBuf,
     pub signtool_path: PathBuf,
+}
+
+pub struct ToolchainPaths {
+    pub compiler_path: PathBuf,
+    pub linker_path: PathBuf,
+    pub debugger_path: PathBuf,
+    pub include_paths: Vec<PathBuf>,
+    pub lib_paths: Vec<PathBuf>,
+
+    pub win_ui_paths: WinUiPaths,
 }
 
 pub struct BuildEnvironment<'a> {
@@ -272,13 +276,15 @@ impl<'a> BuildEnvironment<'a> {
                 let mut flags: Vec<OsString> = vec![
                     "/nologo".into(),
                     "/debug".into(),
-                    "/appcontainer".into(),
                 ];
+                if config.output_type.is_win_ui() {
+                    flags.push("/appcontainer".into());
+                }
                 flags.push(
                     format!(
                         "/SUBSYSTEM:{}",
                         match config.output_type {
-                            OutputType::GuiApp => "WINDOWS",
+                            OutputType::GuiApp | OutputType::WinUiApp => "WINDOWS",
                             OutputType::ConsoleApp => "CONSOLE",
                         },
                     ).into()
@@ -301,70 +307,75 @@ impl<'a> BuildEnvironment<'a> {
                 (flags, dependencies.build())
             }
         };
-        let (midl_flags, midl_dependencies) = match host {
-            Host::Windows => {
-                let mut flags = vec![
-                    "/winrt".into(),
-                    "/metadata_dir".into(),
-                    toolchain_paths.foundation_contract_path.as_os_str().to_os_string(),
-                    "/W1".into(),
-                    "/nologo".into(),
-                    "/char".into(),
-                    "signed".into(),
-                    "/env".into(),
-                    "win32".into(),
-                    "/h".into(),
-                    "nul".into(),
-                    "/dlldata".into(),
-                    "nul".into(),
-                    "/iid".into(),
-                    "nul".into(),
-                    "/proxy".into(),
-                    "nul".into(),
-                    "/notlb".into(),
-                    "/client".into(),
-                    "none".into(),
-                    "/server".into(),
-                    "none".into(),
-                    "/enum_class".into(),
-                    "/ns_prefix".into(),
-                    "/target".into(),
-                    "NT60".into(),
-                    "/nomidl".into(),
-                ];
-                let mut dependencies = DependencyBuilder::default()
-                    .files_in(&toolchain_paths.foundation_contract_path, "winmd").unwrap();
-                for winmd_path in &toolchain_paths.winmd_paths {
-                    for entry in fs::read_dir(winmd_path).unwrap() {
-                        let path = entry.unwrap().path();
-                        if path.extension() == Some(OsStr::new("winmd")) {
-                            flags.push(OsString::from("/reference"));
-                            dependencies = dependencies.file(&path);
-                            flags.push(path.as_os_str().to_owned());
-                        }
+        let (midl_flags, midl_dependencies) = if config.output_type.is_win_ui() {
+            // Assumption: unwrapping is safe here, because midl is only used when in WinUI mode
+            let win_ui_paths = &toolchain_paths.win_ui_paths;
+            let mut flags = vec![
+                "/winrt".into(),
+                "/metadata_dir".into(),
+                win_ui_paths.foundation_contract_path.as_os_str().to_os_string(),
+                "/W1".into(),
+                "/nologo".into(),
+                "/char".into(),
+                "signed".into(),
+                "/env".into(),
+                "win32".into(),
+                "/h".into(),
+                "nul".into(),
+                "/dlldata".into(),
+                "nul".into(),
+                "/iid".into(),
+                "nul".into(),
+                "/proxy".into(),
+                "nul".into(),
+                "/notlb".into(),
+                "/client".into(),
+                "none".into(),
+                "/server".into(),
+                "none".into(),
+                "/enum_class".into(),
+                "/ns_prefix".into(),
+                "/target".into(),
+                "NT60".into(),
+                "/nomidl".into(),
+            ];
+            let mut dependencies = DependencyBuilder::default()
+                .files_in(&win_ui_paths.foundation_contract_path, "winmd").unwrap();
+            for winmd_path in &win_ui_paths.winmd_paths {
+                for entry in fs::read_dir(winmd_path).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.extension() == Some(OsStr::new("winmd")) {
+                        flags.push(OsString::from("/reference"));
+                        dependencies = dependencies.file(&path);
+                        flags.push(path.as_os_str().to_owned());
                     }
                 }
-                for include_path in &toolchain_paths.include_paths {
-                    flags.push(OsString::from("/I"));
-                    flags.push(include_path.as_os_str().to_owned());
-                    dependencies = dependencies.files_in(include_path, "idl").unwrap();
-                }
-                (flags, dependencies.build())
-            },
+            }
+            for include_path in &toolchain_paths.include_paths {
+                flags.push(OsString::from("/I"));
+                flags.push(include_path.as_os_str().to_owned());
+                dependencies = dependencies.files_in(include_path, "idl").unwrap();
+            }
+            (flags, dependencies.build())
+        } else {
+            Default::default()
         };
         let objs_path = artifact_path.join("obj");
         let unmerged_winmds_path = artifact_path.join("unmerged_metadata");
         let merged_winmds_path = artifact_path.join("merged_metadata");
         let generated_sources_path = artifact_path.join("generated_sources");
         let external_projections_path = artifact_path.join("external_projections");
-        let package_dir_path = artifact_path.join("AppX");
+        let package_dir_path = artifact_path.join("package");
         fs::create_dir_all(&objs_path)?;
-        fs::create_dir_all(&unmerged_winmds_path)?;
-        fs::create_dir_all(&merged_winmds_path)?;
-        fs::create_dir_all(&generated_sources_path)?;
-        fs::create_dir_all(&external_projections_path)?;
         fs::create_dir_all(&package_dir_path)?;
 
+        if config.output_type.is_win_ui() {
+            fs::create_dir_all(&unmerged_winmds_path)?;
+            fs::create_dir_all(&merged_winmds_path)?;
+            fs::create_dir_all(&generated_sources_path)?;
+            fs::create_dir_all(&external_projections_path)?;
+        }
+        
         Ok(BuildEnvironment {
             compiler_flags,
             linker_flags,
@@ -482,9 +493,10 @@ impl<'a> BuildEnvironment<'a> {
                 }
             }
         };
-        let mut obj_paths = Vec::new();
-        self.compile_all_idls(&paths)?;
-        self.project_winsdk()?;
+        if self.config.output_type.is_win_ui() {
+            self.compile_all_idls(&paths)?;
+            self.project_winsdk()?;
+        }
         let pch = paths.src_paths.iter().any(|path| path.file_name() == Some(OsStr::new("pch.cpp")));
         if pch {
             let pch_path = self.src_dir_path.join("pch.cpp");
@@ -493,15 +505,15 @@ impl<'a> BuildEnvironment<'a> {
                 .files(header_paths.clone())
                 .files_in(&self.generated_sources_path, "h")?
                 .files_in_recursively(&self.external_projections_path, "h")?;
-
+            
             let gen_pch_path = self.get_artifact_path(&pch_path, &self.objs_path, "pch");
             if self.should_build_artifact(dependencies.build(), &gen_pch_path)? {
                 println!("Generating pre-compiled header");
                 self.compile(pch_path, &self.objs_path, PchOption::GeneratePch)?;
             }
         };
+        let mut obj_paths = Vec::new();
         self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths, pch)?;
-
 
         let exe_name = format!("{}.exe", self.config.name);
         let exe_path = artifact_path.as_ref().join(&exe_name);
@@ -518,25 +530,29 @@ impl<'a> BuildEnvironment<'a> {
         let manifest_output_path = self.package_dir_path.join("AppxManifest.xml");
         super::kill_debugger();
         super::kill_process(&exe_name);
-        if should_relink || self.should_build_artifact(&[&manifest_src_path], &manifest_output_path)? {
-            let mut package_file_paths = vec![
-                artifact_path.as_ref().join(&exe_name),
-                manifest_src_path.clone(),
-    
-                // TODO: this is a horrible hack!
-                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Images".into(),
-                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\WinUITest".into(),
-                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ApplicationModel.Resources.winmd".into(),
-                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.Internal.FrameworkUdk.dll".into(),
-                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ui.xaml.dll".into(),
-                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\resources.pri".into(),
-                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
-            ];
+        if should_relink || (self.config.output_type.is_win_ui() && self.should_build_artifact(&[&manifest_src_path], &manifest_output_path)?) {
+            let mut package_file_paths = vec![artifact_path.as_ref().join(&exe_name)];
+            if self.config.output_type.is_win_ui() {
+                package_file_paths.extend([
+                    manifest_src_path.clone(),
+        
+                    // TODO: this is a horrible hack!
+                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Images".into(),
+                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\WinUITest".into(),
+                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ApplicationModel.Resources.winmd".into(),
+                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.Internal.FrameworkUdk.dll".into(),
+                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ui.xaml.dll".into(),
+                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\resources.pri".into(),
+                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
+                ]);
+            }
             if fs::metadata(&self.assets_dir_path)?.is_dir() {
                 package_file_paths.push(self.assets_dir_path.clone());
             }
             self.copy_to_package_dir(package_file_paths)?;
-            self.install_package()?;
+            if self.config.output_type.is_win_ui() {
+                self.install_package()?;
+            }
         }
         Ok(())
     }
@@ -565,7 +581,8 @@ impl<'a> BuildEnvironment<'a> {
             flags.push("/winmd".into());
             flags.push(winmd_path.as_os_str().to_os_string());
             flags.push(path.as_ref().as_os_str().to_owned());
-            let code = Command::new(&self.toolchain_paths.midl_path)
+            // Assumption: it's safe to unwrap here, because idl files are only supported in WinUI mode
+            let code = Command::new(&self.toolchain_paths.win_ui_paths.midl_path)
                 .args(flags)
                 .env("PATH", self.toolchain_paths.compiler_path.parent().unwrap())
                 .spawn()
@@ -609,7 +626,10 @@ impl<'a> BuildEnvironment<'a> {
             "/o".into(), self.merged_winmds_path.as_os_str().to_owned(),
             "/n:1".into(),
         ];
-        for reference in &self.toolchain_paths.winmd_paths {
+
+        // Assumption: it's safe to unwrap here, because idls are only supported in WinUI mode
+        let win_ui_paths = &self.toolchain_paths.win_ui_paths;
+        for reference in &win_ui_paths.winmd_paths {
             args.push("/metadata_dir".into());
             args.push(reference.as_os_str().to_owned());
             dependencies = dependencies.files_in(reference, "winmd")?;
@@ -621,12 +641,12 @@ impl<'a> BuildEnvironment<'a> {
 
         let merged_path = self.merged_winmds_path.join(&format!("{}.winmd", &self.config.name));
         if self.should_build_artifact(dependencies.build(), &merged_path)? {
-            run_cmd(&self.toolchain_paths.mdmerge_path, args, BuildError::MergedWinMDError)?;
+            run_cmd(&win_ui_paths.mdmerge_path, args, BuildError::MergedWinMDError)?;
         }
 
-        let references = self.toolchain_paths.winmd_paths.iter().cloned();
+        let references = win_ui_paths.winmd_paths.iter().cloned();
         let mut dependencies = DependencyBuilder::default();
-        for path in &self.toolchain_paths.winmd_paths {
+        for path in &win_ui_paths.winmd_paths {
             dependencies = dependencies.files_in(path, "winmd")?;
         }
 
@@ -646,7 +666,7 @@ impl<'a> BuildEnvironment<'a> {
             }
             args.extend(IntoIter::new(["-in".into(), merged_path.as_os_str().to_os_string()]));
             
-            run_cmd(&self.toolchain_paths.cppwinrt_path, args, BuildError::CppWinRtError)
+            run_cmd(&win_ui_paths.cppwinrt_path, args, BuildError::CppWinRtError)
         } else {
             Ok(())
         }
@@ -654,7 +674,8 @@ impl<'a> BuildEnvironment<'a> {
 
     fn project_winmd(&self, path: impl AsRef<Path>, output_path: impl AsRef<Path>) -> Result<(), BuildError> {
         run_cmd(
-            &self.toolchain_paths.cppwinrt_path,
+            // Assumption: it's safe to unwrap here, because WinMDs are only supported in WinUI mode
+            &self.toolchain_paths.win_ui_paths.cppwinrt_path,
             &[
                 OsStr::new("-input"), path.as_ref().as_os_str(),
                 OsStr::new("-output"), output_path.as_ref().as_os_str(),
@@ -672,20 +693,24 @@ impl<'a> BuildEnvironment<'a> {
             args.push("-reference".into());
             args.push(reference.as_ref().to_owned());
         }
-        run_cmd(&self.toolchain_paths.cppwinrt_path, args, BuildError::CppWinRtError)
+        // Assumption: it's safe to unwrap here, because WinMDs are only supported in WinUI mode
+        run_cmd(&self.toolchain_paths.win_ui_paths.cppwinrt_path, args, BuildError::CppWinRtError)
     }
 
     fn project_winsdk(&mut self) -> Result<(), BuildError> {
         let mut dependencies = DependencyBuilder::default()
             .files_in_recursively(r"C:\Windows\System32\WinMetadata", "winmd")?;
-        for winmd_path in &self.toolchain_paths.winmd_paths {
+
+        // Assumption: it's safe to unwrap here, because WinMDs are only supported in WinUI mode
+        let win_ui_paths = &self.toolchain_paths.win_ui_paths;
+        for winmd_path in &win_ui_paths.winmd_paths {
             dependencies = dependencies.files_in_recursively(winmd_path, "winmd")?;
         }
         let external_projections_path = self.external_projections_path.clone();
         if self.should_build_artifacts(dependencies.build(), external_projections_path.join("winrt"), IntoIter::new(["h"]))? {
             println!("Projecting the Windows SDK");
             self.project_winmd("sdk", &self.external_projections_path)?;
-            for winmd_path in &self.toolchain_paths.winmd_paths {
+            for winmd_path in &win_ui_paths.winmd_paths {
                 self.project_winmd_with_references(winmd_path, &self.external_projections_path, &["local"])?;
             }
         }
@@ -924,10 +949,9 @@ fn newest_version<P: AsRef<Path>, const N: usize>(parent: P) -> Option<PathBuf> 
 }
 
 impl ToolchainPaths {
-    pub fn find() -> Result<ToolchainPaths, BuildError> {
+    pub fn find_win_ui_paths(win10: &Path, include_paths: &mut Vec<PathBuf>) -> Result<WinUiPaths, BuildError> {
         let dependency_paths = download_nuget_deps(&["Microsoft.Windows.CppWinRT", "Microsoft.ProjectReunion", "Microsoft.ProjectReunion.WinUI", "Microsoft.ProjectReunion.Foundation"])?;
         let mut winmd_paths = Vec::new();
-        let mut include_paths = Vec::new();
         for md_path in &dependency_paths[2..3] {
             include_paths.push(md_path.join("include"));
             winmd_paths.push(md_path.join(r"lib\uap10.0"));
@@ -935,6 +959,56 @@ impl ToolchainPaths {
 
         let cppwinrt_path = dependency_paths[0].join(r"bin\cppwinrt.exe");
 
+        let mut path = win10.to_path_buf();
+        path.push("References");
+        path.push(newest_version::<_, 4>(&path).unwrap());
+        let mut foundation_contract_path = None;
+        for entry in fs::read_dir(&path).unwrap() {
+            let entry = entry.unwrap();
+            if !entry.file_type().unwrap().is_dir() { continue; }
+
+            let mut path = entry.path();
+            let name = path.file_name().unwrap().to_os_string();
+            let is_foundation_contract = name.to_str()
+                .filter(|name| name.to_ascii_lowercase() == "windows.foundation.foundationcontract")
+                .is_some();
+            if is_foundation_contract {
+                path.push(newest_version::<_, 4>(&path).unwrap());
+                foundation_contract_path = Some(path);
+            }
+        }
+        let foundation_contract_path = foundation_contract_path.unwrap();
+
+        let mut path = win10.to_path_buf();
+        path.push("UnionMetadata");
+        path.push(newest_version::<_, 4>(&path).unwrap());
+        winmd_paths.push(path.clone());
+
+        let mut path = win10.to_path_buf();
+        path.push("bin");
+        // TODO: error handling
+        path.push(newest_version::<_, 4>(&path).unwrap());
+        path.push("x86");
+        let midl_path = path.join("midl.exe");
+        let mdmerge_path = path.join("mdmerge.exe");
+        let makeappx_path = path.join("makeappx.exe");
+        let signtool_path = path.join("signtool.exe");
+
+        Ok(
+            WinUiPaths {
+                foundation_contract_path,
+                winmd_paths,
+
+                cppwinrt_path,
+                midl_path,
+                mdmerge_path,
+                makeappx_path,
+                signtool_path,
+            }
+        )
+    }
+
+    pub fn find(win_ui_mode: bool) -> Result<ToolchainPaths, BuildError> {
         let mut path = PathBuf::from(r"C:\Program Files (x86)");
         let program_files = path.clone();
         path.push("Microsoft Visual Studio");
@@ -983,7 +1057,7 @@ impl ToolchainPaths {
 
         let atlmfc = path.clone();
         path.push("include");
-        include_paths.push(path);
+        let mut include_paths = vec![path];
 
         let mut path = atlmfc;
         path.push("lib");
@@ -1032,40 +1106,11 @@ impl ToolchainPaths {
             path.pop();
         }
 
-        let mut path = win10.clone();
-        path.push("References");
-        path.push(newest_version::<_, 4>(&path).unwrap());
-        let mut foundation_contract_path = None;
-        for entry in fs::read_dir(&path).unwrap() {
-            let entry = entry.unwrap();
-            if !entry.file_type().unwrap().is_dir() { continue; }
-
-            let mut path = entry.path();
-            let name = path.file_name().unwrap().to_os_string();
-            let is_foundation_contract = name.to_str()
-                .filter(|name| name.to_ascii_lowercase() == "windows.foundation.foundationcontract")
-                .is_some();
-            if is_foundation_contract {
-                path.push(newest_version::<_, 4>(&path).unwrap());
-                foundation_contract_path = Some(path);
-            }
-        }
-        let foundation_contract_path = foundation_contract_path.unwrap();
-
-        let mut path = win10.clone();
-        path.push("UnionMetadata");
-        path.push(newest_version::<_, 4>(&path).unwrap());
-        winmd_paths.push(path.clone());
-
-        let mut path = win10;
-        path.push("bin");
-        // TODO: error handling
-        path.push(newest_version::<_, 4>(&path).unwrap());
-        path.push("x86");
-        let midl_path = path.join("midl.exe");
-        let mdmerge_path = path.join("mdmerge.exe");
-        let makeappx_path = path.join("makeappx.exe");
-        let signtool_path = path.join("signtool.exe");
+        let win_ui_paths = if win_ui_mode {
+            Some(ToolchainPaths::find_win_ui_paths(&win10, &mut include_paths)?)
+        } else {
+            None
+        };
 
         Ok(
             ToolchainPaths {
@@ -1075,14 +1120,7 @@ impl ToolchainPaths {
                 include_paths,
                 lib_paths,
 
-                foundation_contract_path,
-                winmd_paths,
-
-                cppwinrt_path,
-                midl_path,
-                mdmerge_path,
-                makeappx_path,
-                signtool_path,
+                win_ui_paths: win_ui_paths.unwrap(),
             }
         )
     }
