@@ -432,6 +432,7 @@ impl<'a> BuildEnvironment<'a> {
             BuildError::MergedWinMDError => println!("unable to merge Windows metadata (winmd) files."),
             BuildError::NugetError => println!("unable to fetch nuget dependencies."),
             BuildError::InstallError => println!("unable to install package."),
+            BuildError::FileLockTimeoutReached => println!("file lock timeout reached while attempting to copy to package directory."),
 
             BuildError::IoError(io_error) => println!("there was an io error: {:?}.", io_error.kind()),
         }
@@ -526,7 +527,9 @@ impl<'a> BuildEnvironment<'a> {
         self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths, pch)?;
 
         let exe_name = format!("{}.exe", self.config.name);
+        let pdb_name = format!("{}.pdb", self.config.name);
         let exe_path = artifact_path.as_ref().join(&exe_name);
+        let pdb_path = artifact_path.as_ref().join(&pdb_name);
 
         let dependencies: Vec<_> = obj_paths.clone().iter().cloned()
             .chain(self.linker_lib_dependencies.iter().cloned())
@@ -541,7 +544,7 @@ impl<'a> BuildEnvironment<'a> {
         super::kill_debugger();
         super::kill_process(&exe_name);
         if should_relink || (self.config.output_type.is_win_ui() && self.should_build_artifact(&[&manifest_src_path], &manifest_output_path)?) {
-            let mut package_file_paths = vec![artifact_path.as_ref().join(&exe_name)];
+            let mut package_file_paths = vec![exe_path, pdb_path];
             if self.config.output_type.is_win_ui() {
                 package_file_paths.extend([
                     manifest_src_path.clone(),
@@ -854,7 +857,7 @@ impl<'a> BuildEnvironment<'a> {
         //
         // TODO: Speed, incrementalism
         let begin_time = Instant::now();
-        while let Some(error) = fs::remove_dir_all(&package_dir_path).err() {
+        while fs::remove_dir_all(&package_dir_path).is_err() {
             if Instant::now().duration_since(begin_time).as_millis() > PACKAGE_DIR_LOCK_TIMEOUT {
                 return Err(BuildError::FileLockTimeoutReached);
             }
