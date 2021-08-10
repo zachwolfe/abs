@@ -8,11 +8,14 @@ use std::os::windows::prelude::*;
 use std::iter;
 use std::collections::HashMap;
 use std::array::IntoIter;
+use std::time::Instant;
 
 use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
 
 const MANIFEST_FILE_NAME: &str = "AppxManifest.xml";
+// In milliseconds
+const PACKAGE_DIR_LOCK_TIMEOUT: u128 = 500;
 
 pub struct WinUiPaths {
     pub foundation_contract_path: PathBuf,
@@ -70,6 +73,7 @@ pub enum BuildError {
     IdlError,
     NugetError,
     InstallError,
+    FileLockTimeoutReached,
 
     IoError(io::Error),
 }
@@ -845,8 +849,16 @@ impl<'a> BuildEnvironment<'a> {
 
     fn copy_to_package_dir(&mut self, file_paths: impl IntoIterator<Item=impl AsRef<Path>>) -> Result<(), BuildError> {
         let package_dir_path = self.package_dir_path.clone();
+        // If the debugger or exe was just terminated by ABS, some file locks may persist for a little
+        // longer, causing deleting the directory to fail. So, until the timeout, retry repeatedly.
+        //
         // TODO: Speed, incrementalism
-        fs::remove_dir_all(&package_dir_path)?;
+        let begin_time = Instant::now();
+        while let Some(error) = fs::remove_dir_all(&package_dir_path).err() {
+            if Instant::now().duration_since(begin_time).as_millis() > PACKAGE_DIR_LOCK_TIMEOUT {
+                return Err(BuildError::FileLockTimeoutReached);
+            }
+        }
         fs::create_dir_all(&package_dir_path)?;
         self.copy_to_package_dir_recursive(file_paths, package_dir_path)
     }

@@ -16,14 +16,15 @@ use proj_config::{ProjectConfig, OutputType, Host, CxxOptions};
 use cmd_options::{CmdOptions, CompileMode, Subcommand};
 use build::{BuildEnvironment, ToolchainPaths};
 
-pub fn kill_process(path: impl AsRef<Path>) {
-    let _output = Command::new("taskkill")
+pub fn kill_process(path: impl AsRef<Path>) -> bool {
+    Command::new("taskkill")
         .args(&[OsStr::new("/F"), OsStr::new("/IM"), path.as_ref().as_os_str()])
-        .output();
+        .output()
+        .is_ok()
 }
 
-fn kill_debugger() {
-    kill_process("devenv.exe");
+fn kill_debugger() -> bool {
+    kill_process("devenv.exe")
 }
 
 fn main() {
@@ -163,7 +164,6 @@ int main() {{
             }
         },
         Subcommand::Debug(_) => {
-            kill_debugger();
             Command::new(&toolchain_paths.debugger_path)
                 .args(&[OsStr::new("/debugexe"), run_path.as_os_str()])
                 .spawn()
