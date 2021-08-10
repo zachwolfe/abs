@@ -12,6 +12,8 @@ use std::array::IntoIter;
 use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
 
+const MANIFEST_FILE_NAME: &str = "AppxManifest.xml";
+
 pub struct WinUiPaths {
     pub foundation_contract_path: PathBuf,
 
@@ -530,8 +532,8 @@ impl<'a> BuildEnvironment<'a> {
             self.link(&exe_path, obj_paths)?;
         }
 
-        let manifest_src_path = self.src_dir_path.join("AppxManifest.xml");
-        let manifest_output_path = self.package_dir_path.join("AppxManifest.xml");
+        let manifest_src_path = self.src_dir_path.join(MANIFEST_FILE_NAME);
+        let manifest_output_path = self.package_dir_path.join(MANIFEST_FILE_NAME);
         super::kill_debugger();
         super::kill_process(&exe_name);
         if should_relink || (self.config.output_type.is_win_ui() && self.should_build_artifact(&[&manifest_src_path], &manifest_output_path)?) {
@@ -850,7 +852,7 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     fn install_package(&mut self) -> Result<(), BuildError> {
-        run_ps_cmd("Add-AppxPackage", &["-Register".into(), self.package_dir_path.join("AppxManifest.xml")], BuildError::InstallError)
+        run_ps_cmd("Add-AppxPackage", &["-Register".into(), self.package_dir_path.join(MANIFEST_FILE_NAME)], BuildError::InstallError)
     }
 }
 
