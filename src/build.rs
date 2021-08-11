@@ -543,29 +543,27 @@ impl<'a> BuildEnvironment<'a> {
         let manifest_output_path = self.package_dir_path.join(MANIFEST_FILE_NAME);
         super::kill_debugger();
         super::kill_process(&exe_name);
-        if should_relink || (self.config.output_type.is_win_ui() && self.should_build_artifact(&[&manifest_src_path], &manifest_output_path)?) {
-            let mut package_file_paths = vec![exe_path, pdb_path];
-            if self.config.output_type.is_win_ui() {
-                package_file_paths.extend([
-                    manifest_src_path.clone(),
-        
-                    // TODO: this is a horrible hack!
-                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Images".into(),
-                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\WinUITest".into(),
-                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ApplicationModel.Resources.winmd".into(),
-                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.Internal.FrameworkUdk.dll".into(),
-                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ui.xaml.dll".into(),
-                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\resources.pri".into(),
-                    r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
-                ]);
-            }
-            if fs::metadata(&self.assets_dir_path)?.is_dir() {
-                package_file_paths.push(self.assets_dir_path.clone());
-            }
-            self.copy_to_package_dir(package_file_paths)?;
-            if self.config.output_type.is_win_ui() {
-                self.install_package()?;
-            }
+        let mut package_file_paths = vec![exe_path, pdb_path];
+        if self.config.output_type.is_win_ui() {
+            package_file_paths.extend([
+                manifest_src_path.clone(),
+    
+                // TODO: this is a horrible hack!
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Images".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\WinUITest".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ApplicationModel.Resources.winmd".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.Internal.FrameworkUdk.dll".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\Microsoft.ui.xaml.dll".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\resources.pri".into(),
+                r"C:\Users\zachr\Work\WinUITest\WinUITest (Package)\bin\x86\Debug\AppX\ucrtbased.dll".into(),
+            ]);
+        }
+        if fs::metadata(&self.assets_dir_path)?.is_dir() {
+            package_file_paths.push(self.assets_dir_path.clone());
+        }
+        self.copy_to_package_dir(package_file_paths)?;
+        if self.config.output_type.is_win_ui() && self.should_build_artifact(&[&manifest_src_path], &manifest_output_path)? {
+            self.install_package()?;
         }
         Ok(())
     }
