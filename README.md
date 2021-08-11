@@ -1,5 +1,15 @@
 # ABS: A Build System
-A dead simple build system for C++ that values convention over configuration. Currently only supports Windows 10. It may or may not work on your machine; feel free to file an issue.
+A dead simple build system for C++ that values convention over configuration. Created due to my distaste for other build systems. This project is in its infancy and basic functionality that I don't frequently depend on is likely to be broken (see [Current Status](#current-status)); use at your own risk! Feel free to file issues.
+
+## Current Status
+- Building anything except 32-bit Win32 console apps is probably broken
+- Adding icons is not yet supported
+- Only supports Windows for now; support for Apple platforms and Linux is planned
+- The JSON manifest format *might* be replaced with build scripts written in C++. This could enable things like:
+  - Building code written in other programming languages
+  - Domain-specific or platform-specific preprocessing, like generating C++/WinRT projections for the Windows API, assembling application bundles for macOS, etc.
+  - Downloading dependencies
+  - Moving most of the complexity into modular build scripts, enabling the core of ABS to be simplified
 
 ## Usage
 - From ABS' root directory, install ABS using `cargo install --path .`
