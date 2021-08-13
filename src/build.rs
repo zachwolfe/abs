@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, BufReader};
 use std::cmp::Ordering;
 use std::process::Command;
 use std::ffi::{OsStr, OsString};
@@ -8,6 +8,7 @@ use std::os::windows::prelude::*;
 use std::collections::HashMap;
 use std::array::IntoIter;
 use std::time::Instant;
+use serde::Deserialize;
 
 use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
@@ -34,6 +35,7 @@ pub struct BuildEnvironment<'a> {
     src_dir_path: PathBuf,
     assets_dir_path: PathBuf,
     objs_path: PathBuf,
+    src_deps_path: PathBuf,
     pub package_dir_path: PathBuf,
 
     file_edit_times: HashMap<PathBuf, u64>,
@@ -43,6 +45,7 @@ pub struct BuildEnvironment<'a> {
 pub enum BuildError {
     NoSrcDirectory,
     CantReadSrcDirectory,
+    DiscoverSrcDepsError,
     CompilerError,
     LinkerError,
     FileLockTimeoutReached,
@@ -253,8 +256,10 @@ impl<'a> BuildEnvironment<'a> {
             }
         };
         let objs_path = artifact_path.join("obj");
+        let src_deps_path = artifact_path.join("src_deps");
         let package_dir_path = artifact_path.join("package");
         fs::create_dir_all(&objs_path)?;
+        fs::create_dir_all(&src_deps_path)?;
         fs::create_dir_all(&package_dir_path)?;
 
         Ok(BuildEnvironment {
@@ -268,6 +273,7 @@ impl<'a> BuildEnvironment<'a> {
             src_dir_path: "src".into(),
             assets_dir_path: "assets".into(),
             objs_path,
+            src_deps_path,
             package_dir_path,
 
             file_edit_times: HashMap::new(),
@@ -294,6 +300,7 @@ impl<'a> BuildEnvironment<'a> {
         match error {
             BuildError::NoSrcDirectory => println!("src directory does not exist."),
             BuildError::CantReadSrcDirectory => println!("unable to read src directory."),
+            BuildError::DiscoverSrcDepsError => println!("unable to discover source dependencies."),
             BuildError::CompilerError => println!("unable to compile."),
             BuildError::LinkerError => println!("unable to link."),
             BuildError::FileLockTimeoutReached => println!("file lock timeout reached while attempting to copy to package directory."),
@@ -368,10 +375,11 @@ impl<'a> BuildEnvironment<'a> {
         let pch = paths.src_paths.iter().any(|path| path.file_name() == Some(OsStr::new("pch.cpp")));
         if pch {
             let pch_path = self.src_dir_path.join("pch.cpp");
+            let dependencies = self.discover_src_deps(&pch_path, self.src_deps_path.clone())?;
             let dependencies = DependencyBuilder::default()
                 .file(&pch_path)
-                .files(header_paths.clone());
-
+                .files(dependencies);
+            
             let gen_pch_path = self.get_artifact_path(&pch_path, &self.objs_path, "pch");
             if self.should_build_artifact(dependencies.build(), &gen_pch_path)? {
                 println!("Generating pre-compiled header");
@@ -445,6 +453,42 @@ impl<'a> BuildEnvironment<'a> {
         }
 
         Ok(())
+    }
+
+    fn discover_src_deps(&mut self, path: impl AsRef<Path>, src_deps_path: impl AsRef<Path>) -> Result<Vec<PathBuf>, BuildError> {
+        // TODO: Support MSVC's versioning
+        #[derive(Deserialize)]
+        struct SrcDeps {
+            #[serde(rename = "Data")]
+            data: SrcDepsData,
+        }
+
+        #[derive(Deserialize)]
+        struct SrcDepsData {
+            #[serde(rename = "Includes")]
+            includes: Vec<PathBuf>,
+        }
+
+        let path = path.as_ref();
+        let src_deps_json_path = self.get_artifact_path(&path, &src_deps_path, "json");
+        if self.should_build_artifact([path], &src_deps_json_path)? {
+            let mut args = self.compiler_flags.clone();
+            args.push(
+                cmd_flag(
+                    "/sourceDependencies",
+                    &src_deps_json_path
+                )
+            );
+            args.push(path.into());
+            run_cmd(&self.toolchain_paths.compiler_path, &args, BuildError::DiscoverSrcDepsError)?;
+        }
+
+        let src_deps_file = File::open(&src_deps_json_path)?;
+        let src_deps_reader = BufReader::new(src_deps_file);
+        let src_deps: SrcDeps = serde_json::from_reader(src_deps_reader)
+            .or(Err(BuildError::DiscoverSrcDepsError))?;
+        
+        Ok(src_deps.data.includes)
     }
 
     fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
