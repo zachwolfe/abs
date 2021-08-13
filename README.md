@@ -1,8 +1,8 @@
 # ABS: A Build System
 A dead simple build system for C++ that values convention over configuration. Created due to my distaste for other build systems. This project is in its infancy and basic functionality that I don't frequently depend on is likely to be broken (see [Current Status](#current-status)); use at your own risk! Feel free to file issues.
 
-## Current Status
-- Building anything except 32-bit Win32 console apps is probably broken
+## Current Status & Future Plans
+- Building anything except 32-bit Windows apps is probably broken
 - Adding icons is not yet supported
 - Only supports Windows for now; support for Apple platforms and Linux is planned
 - The JSON manifest format *might* be replaced with build scripts written in C++. This could enable things like:
