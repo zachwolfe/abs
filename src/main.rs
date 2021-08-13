@@ -102,7 +102,7 @@ int main() {{
             let config: ProjectConfig = serde_json::from_reader(config_file)
                 .unwrap_or_else(|error| fail_immediate!("Failed to parse project file: {}", error));
 
-            let toolchain_paths = ToolchainPaths::find(config.output_type.is_win_ui()).unwrap();
+            let toolchain_paths = ToolchainPaths::find().unwrap();
             
             // Create abs/debug or abs/release, if it doesn't exist already
             let artifact_subdirectory = match build_options.compile_mode {
@@ -160,7 +160,7 @@ int main() {{
                     // Only wait for the process to complete if this is a console app
                     child.wait().unwrap();
                 },
-                OutputType::GuiApp | OutputType::WinUiApp => {}
+                OutputType::GuiApp => {}
             }
         },
         Subcommand::Debug(_) => {

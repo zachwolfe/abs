@@ -47,14 +47,7 @@ impl Default for CxxStandard {
 #[serde(rename_all="snake_case")]
 pub enum OutputType {
     GuiApp,
-    WinUiApp,
     ConsoleApp,
-}
-
-impl OutputType {
-    pub fn is_win_ui(&self) -> bool { 
-        matches!(self, OutputType::WinUiApp)
-    }
 }
 
 pub enum Host {
