@@ -63,7 +63,6 @@ impl From<io::Error> for BuildError {
 pub struct SrcPaths {
     pub root: PathBuf,
     pub src_paths: Vec<PathBuf>,
-    pub idl_paths: Vec<PathBuf>,
     pub children: Vec<SrcPaths>,
 }
 
@@ -80,7 +79,6 @@ impl SrcPaths {
                     if let Some(extension) = path.extension().and_then(OsStr::to_str) {
                         match extension {
                             "cpp" | "cxx" | "cc"   => paths.src_paths.push(path),
-                            "idl"                  => paths.idl_paths.push(path),
                             _ => {},
                         }
                     }
@@ -727,7 +725,7 @@ impl ToolchainPaths {
         // TODO: error handling
         path.push(newest_version::<_, 4>(&path).unwrap());
         // include_paths.push(path.clone());
-        for name in &["ucrt", "shared", "um", "winrt"] {
+        for &name in &["ucrt", "shared", "um", "winrt"] {
             path.push(name);
             include_paths.push(path.clone());
             path.pop();
