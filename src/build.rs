@@ -68,9 +68,8 @@ pub struct SrcPaths {
 }
 
 impl SrcPaths {
-    // Returns tuple of src paths and header paths.
-    pub fn from_root(root: impl Into<PathBuf>) -> io::Result<(SrcPaths, Vec<PathBuf>)> {
-        fn src_paths(root: PathBuf, header_paths: &mut Vec<PathBuf>, entries: impl IntoIterator<Item=io::Result<fs::DirEntry>>) -> io::Result<SrcPaths> {
+    pub fn from_root(root: impl Into<PathBuf>) -> io::Result<SrcPaths> {
+        fn src_paths(root: PathBuf, entries: impl IntoIterator<Item=io::Result<fs::DirEntry>>) -> io::Result<SrcPaths> {
             let mut paths = SrcPaths::default();
             paths.root = root;
             for entry in entries {
@@ -82,14 +81,13 @@ impl SrcPaths {
                         match extension {
                             "cpp" | "cxx" | "cc"   => paths.src_paths.push(path),
                             "idl"                  => paths.idl_paths.push(path),
-                            "h"   | "hpp" | "hxx"  => header_paths.push(path),
                             _ => {},
                         }
                     }
                 } else if file_type.is_dir() {
                     let path = entry.path();
                     let entries = fs::read_dir(&path)?;
-                    let child = src_paths(path, header_paths, entries)?;
+                    let child = src_paths(path, entries)?;
                     paths.children.push(child);
                 }
             }
@@ -98,9 +96,8 @@ impl SrcPaths {
         
         let root = root.into();
         let entries = fs::read_dir(&root)?;
-        let mut header_paths = Vec::new();
-        let src_paths = src_paths(root, &mut header_paths, entries)?;
-        Ok((src_paths, header_paths))
+        let src_paths = src_paths(root, entries)?;
+        Ok(src_paths)
     }
 }
 
@@ -362,7 +359,7 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     pub fn build(&mut self, artifact_path: impl AsRef<Path>) -> Result<(), BuildError> {
-        let (paths, _) = match SrcPaths::from_root(&self.src_dir_path) {
+        let paths = match SrcPaths::from_root(&self.src_dir_path) {
             Ok(paths) => paths,
             Err(error) => {
                 if let io::ErrorKind::NotFound = error.kind() {
