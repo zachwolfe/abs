@@ -362,7 +362,7 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     pub fn build(&mut self, artifact_path: impl AsRef<Path>) -> Result<(), BuildError> {
-        let (paths, header_paths) = match SrcPaths::from_root(&self.src_dir_path) {
+        let (paths, _) = match SrcPaths::from_root(&self.src_dir_path) {
             Ok(paths) => paths,
             Err(error) => {
                 if let io::ErrorKind::NotFound = error.kind() {
@@ -375,19 +375,23 @@ impl<'a> BuildEnvironment<'a> {
         let pch = paths.src_paths.iter().any(|path| path.file_name() == Some(OsStr::new("pch.cpp")));
         if pch {
             let pch_path = self.src_dir_path.join("pch.cpp");
-            let dependencies = self.discover_src_deps(&pch_path, self.src_deps_path.clone())?;
-            let dependencies = DependencyBuilder::default()
-                .file(&pch_path)
-                .files(dependencies);
-            
-            let gen_pch_path = self.get_artifact_path(&pch_path, &self.objs_path, "pch");
-            if self.should_build_artifact(dependencies.build(), &gen_pch_path)? {
+            let should_rebuild = if let Some(dependencies) = self.discover_src_deps(&pch_path)? {
+                let dependencies = DependencyBuilder::default()
+                    .file(&pch_path)
+                    .files(dependencies);
+                let gen_pch_path = self.get_artifact_path(&pch_path, &self.objs_path, "pch");
+                self.should_build_artifact(dependencies.build(), &gen_pch_path)?
+            } else {
+                true
+            };
+
+            if should_rebuild {
                 println!("Generating pre-compiled header");
                 self.compile(pch_path, &self.objs_path, PchOption::GeneratePch)?;
             }
         };
         let mut obj_paths = Vec::new();
-        self.compile_directory(&paths, header_paths.iter().map(|path| path.as_ref()), &mut obj_paths, pch)?;
+        self.compile_directory(&paths, &mut obj_paths, pch)?;
 
         let exe_name = format!("{}.exe", self.config.name);
         let pdb_name = format!("{}.pdb", self.config.name);
@@ -428,19 +432,26 @@ impl<'a> BuildEnvironment<'a> {
     pub fn compile_directory<'b>(
         &mut self,
         paths: &'b SrcPaths,
-        header_paths: impl IntoIterator<Item=&'b Path> + Clone,
         obj_paths: &mut Vec<PathBuf>,
         pch: bool,
     ) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
-        let dependencies = DependencyBuilder::default()
-            .files(header_paths.clone());
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
             obj_paths.push(obj_path.clone());
             let is_pch = path.file_name() == Some(OsStr::new("pch.cpp")) && path.parent() == Some(&self.src_dir_path);
-            if !is_pch && self.should_build_artifact(dependencies.clone().file(path).build(), &obj_path)? {
+            let should_rebuild = !is_pch && if let Some(dependencies) = self.discover_src_deps(path)? {
+                let dependencies = DependencyBuilder::default()
+                    .file(path)
+                    .files(dependencies)
+                    .build();
+                self.should_build_artifact(dependencies, &obj_path)?
+            } else {
+                true
+            };
+
+            if should_rebuild {
                 let mut obj_subdir_path = obj_path;
                 obj_subdir_path.pop();
                 fs::create_dir_all(&obj_subdir_path).unwrap();
@@ -449,13 +460,13 @@ impl<'a> BuildEnvironment<'a> {
         }
 
         for child in &paths.children {
-            self.compile_directory(child, header_paths.clone(), obj_paths, pch)?;
+            self.compile_directory(child, obj_paths, pch)?;
         }
 
         Ok(())
     }
 
-    fn discover_src_deps(&mut self, path: impl AsRef<Path>, src_deps_path: impl AsRef<Path>) -> Result<Vec<PathBuf>, BuildError> {
+    fn discover_src_deps(&mut self, path: impl AsRef<Path>) -> Result<Option<Vec<PathBuf>>, BuildError> {
         // TODO: Support MSVC's versioning
         #[derive(Deserialize)]
         struct SrcDeps {
@@ -467,28 +478,28 @@ impl<'a> BuildEnvironment<'a> {
         struct SrcDepsData {
             #[serde(rename = "Includes")]
             includes: Vec<PathBuf>,
+            #[serde(rename = "PCH")]
+            pch: Option<PathBuf>,
         }
 
         let path = path.as_ref();
-        let src_deps_json_path = self.get_artifact_path(&path, &src_deps_path, "json");
+        let src_deps_json_path = self.get_artifact_path(&path, &self.src_deps_path, "json");
         if self.should_build_artifact([path], &src_deps_json_path)? {
-            let mut args = self.compiler_flags.clone();
-            args.push(
-                cmd_flag(
-                    "/sourceDependencies",
-                    &src_deps_json_path
-                )
-            );
-            args.push(path.into());
-            run_cmd(&self.toolchain_paths.compiler_path, &args, BuildError::DiscoverSrcDepsError)?;
-        }
+            Ok(None)
+        } else {
+            let src_deps_file = File::open(&src_deps_json_path)?;
+            let src_deps_reader = BufReader::new(src_deps_file);
+            let src_deps: SrcDeps = serde_json::from_reader(src_deps_reader)
+                .or(Err(BuildError::DiscoverSrcDepsError))?;
 
-        let src_deps_file = File::open(&src_deps_json_path)?;
-        let src_deps_reader = BufReader::new(src_deps_file);
-        let src_deps: SrcDeps = serde_json::from_reader(src_deps_reader)
-            .or(Err(BuildError::DiscoverSrcDepsError))?;
-        
-        Ok(src_deps.data.includes)
+            let mut dependencies = DependencyBuilder::default()
+                .files(src_deps.data.includes);
+            if let Some(pch) = src_deps.data.pch {
+                dependencies = dependencies.file(pch);
+            }
+            
+            Ok(Some(dependencies.build()))
+        }
     }
 
     fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
@@ -520,6 +531,13 @@ impl<'a> BuildEnvironment<'a> {
             cmd_flag(
                 "/Fd",
                 self.objs_path.join(&format!("{}.pdb", &self.config.name))
+            )
+        );
+        let src_deps_json_path = self.get_artifact_path(&path, &self.src_deps_path, "json");
+        args.push(
+            cmd_flag(
+                "/sourceDependencies",
+                src_deps_json_path,
             )
         );
         args.push(path.as_os_str().to_owned());
