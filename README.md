@@ -9,7 +9,7 @@ A dead simple build system for C++ that values convention over configuration. Cr
   - Building code written in other programming languages
   - Domain-specific or platform-specific preprocessing, like generating C++/WinRT projections for the Windows API, assembling application bundles for macOS, etc.
   - Downloading dependencies
-  - Moving most of the complexity into modular build scripts, enabling the core of ABS to be simplified
+  - Moving most of the complexity into modular build scripts, enabling the core of ABS to stay simple
 
 ## Usage
 - From ABS' root directory, install ABS using `cargo install --path .`
