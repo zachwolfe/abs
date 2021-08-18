@@ -7,14 +7,10 @@ use std::ffi::{OsStr, OsString};
 use std::os::windows::prelude::*;
 use std::collections::HashMap;
 use std::array::IntoIter;
-use std::time::Instant;
 use serde::Deserialize;
 
 use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
-
-// In milliseconds
-const PACKAGE_DIR_LOCK_TIMEOUT: u128 = 500;
 
 pub struct ToolchainPaths {
     pub compiler_path: PathBuf,
@@ -36,7 +32,6 @@ pub struct BuildEnvironment<'a> {
     assets_dir_path: PathBuf,
     objs_path: PathBuf,
     src_deps_path: PathBuf,
-    pub package_dir_path: PathBuf,
 
     file_edit_times: HashMap<PathBuf, u64>,
 }
@@ -48,7 +43,6 @@ pub enum BuildError {
     DiscoverSrcDepsError,
     CompilerError,
     LinkerError,
-    FileLockTimeoutReached,
 
     IoError(io::Error),
 }
@@ -252,10 +246,8 @@ impl<'a> BuildEnvironment<'a> {
         };
         let objs_path = artifact_path.join("obj");
         let src_deps_path = artifact_path.join("src_deps");
-        let package_dir_path = artifact_path.join("package");
         fs::create_dir_all(&objs_path)?;
         fs::create_dir_all(&src_deps_path)?;
-        fs::create_dir_all(&package_dir_path)?;
 
         Ok(BuildEnvironment {
             compiler_flags,
@@ -269,7 +261,6 @@ impl<'a> BuildEnvironment<'a> {
             assets_dir_path: "assets".into(),
             objs_path,
             src_deps_path,
-            package_dir_path,
 
             file_edit_times: HashMap::new(),
         })
@@ -298,7 +289,6 @@ impl<'a> BuildEnvironment<'a> {
             BuildError::DiscoverSrcDepsError => println!("unable to discover source dependencies."),
             BuildError::CompilerError => println!("unable to compile."),
             BuildError::LinkerError => println!("unable to link."),
-            BuildError::FileLockTimeoutReached => println!("file lock timeout reached while attempting to copy to package directory."),
 
             BuildError::IoError(io_error) => println!("there was an io error: {:?}.", io_error.kind()),
         }
@@ -396,18 +386,26 @@ impl<'a> BuildEnvironment<'a> {
         let dependencies: Vec<_> = obj_paths.clone().iter().cloned()
             .chain(self.linker_lib_dependencies.iter().cloned())
             .collect();
+
+        super::kill_debugger();
+        super::kill_process(&exe_name);
+
+        // File locks may continue to be held on the exe for some time after it is terminated,
+        // causing linking to fail. So, while the exit code is 1, keep trying to kill.
+        //
+        // This is kind of a hack, but it seems to work well enough.
+        while super::kill_debugger() == Some(1) {}
+        while super::kill_process(&exe_name) == Some(1) {}
+            
         let should_relink = self.should_build_artifact(&dependencies, &exe_path)?;
         if should_relink {
             self.link(&exe_path, obj_paths)?;
         }
 
-        super::kill_debugger();
-        super::kill_process(&exe_name);
         let mut package_file_paths = vec![exe_path, pdb_path];
         if fs::metadata(&self.assets_dir_path)?.is_dir() {
             package_file_paths.push(self.assets_dir_path.clone());
         }
-        self.copy_to_package_dir(package_file_paths)?;
         Ok(())
     }
 
@@ -561,43 +559,6 @@ impl<'a> BuildEnvironment<'a> {
             args.push(path.into());
         }
         run_cmd(&self.toolchain_paths.linker_path, &args, BuildError::LinkerError)
-    }
-
-    fn copy_to_package_dir_recursive(&mut self, file_paths: impl IntoIterator<Item=impl AsRef<Path>>, output: impl AsRef<Path>) -> Result<(), BuildError> {
-        for path in file_paths {
-            let metadata = fs::metadata(path.as_ref())?;
-            let file_name = path.as_ref().file_name().clone().unwrap();
-            if metadata.is_dir() {
-                let children: Result<Vec<_>, _> = fs::read_dir(path.as_ref())?
-                    .map(|entry|
-                        entry.map(|entry| entry.path())
-                    )
-                    .collect();
-                let write_dir_path = output.as_ref().join(&file_name);
-                fs::create_dir_all(&write_dir_path)?;
-                self.copy_to_package_dir_recursive(children?, &write_dir_path)?;
-            } else if metadata.is_file() {
-                fs::copy(path.as_ref(), output.as_ref().join(&file_name))?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn copy_to_package_dir(&mut self, file_paths: impl IntoIterator<Item=impl AsRef<Path>>) -> Result<(), BuildError> {
-        let package_dir_path = self.package_dir_path.clone();
-        // If the debugger or exe was just terminated by ABS, some file locks may persist for a little
-        // longer, causing deleting the directory to fail. So, until the timeout, retry repeatedly.
-        //
-        // TODO: Speed, incrementalism
-        let begin_time = Instant::now();
-        while fs::remove_dir_all(&package_dir_path).is_err() {
-            if Instant::now().duration_since(begin_time).as_millis() > PACKAGE_DIR_LOCK_TIMEOUT {
-                return Err(BuildError::FileLockTimeoutReached);
-            }
-        }
-        fs::create_dir_all(&package_dir_path)?;
-        self.copy_to_package_dir_recursive(file_paths, package_dir_path)
     }
 }
 

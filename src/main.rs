@@ -16,14 +16,15 @@ use proj_config::{ProjectConfig, OutputType, Host, CxxOptions};
 use cmd_options::{CmdOptions, CompileMode, Subcommand};
 use build::{BuildEnvironment, ToolchainPaths};
 
-pub fn kill_process(path: impl AsRef<Path>) -> bool {
+pub fn kill_process(path: impl AsRef<Path>) -> Option<i32> {
     Command::new("taskkill")
         .args(&[OsStr::new("/F"), OsStr::new("/IM"), path.as_ref().as_os_str()])
         .output()
-        .is_ok()
+        .map(|output| output.status.code())
+        .unwrap_or(None)
 }
 
-fn kill_debugger() -> bool {
+fn kill_debugger() -> Option<i32> {
     kill_process("devenv.exe")
 }
 
@@ -53,7 +54,7 @@ fn main() {
             _task_failed!();
         }}
     }
-    let (config, package_dir_path, toolchain_paths) = match &options.sub_command {
+    let (config, artifact_path, toolchain_paths) = match &options.sub_command {
         Subcommand::Init { project_root } => {
             let project_root: Cow<Path> = project_root.as_ref()
                 .map(|path| Cow::from(path.as_path()))
@@ -125,11 +126,10 @@ int main() {{
             }
 
             println!("Build succeeded.");
-            let package_dir_path = env.package_dir_path;
-            (config, package_dir_path, toolchain_paths)
+            (config, artifact_path, toolchain_paths)
         },
         Subcommand::Clean => {
-            for mode in ["debug", "release"].iter() {
+            for &mode in ["debug", "release"].iter() {
                 if let Err(error) = fs::remove_dir_all(Path::new("abs/").join(mode)) {
                     match error.kind() {
                         IoErrorKind::NotFound => {},
@@ -147,12 +147,11 @@ int main() {{
         },
     };
 
-    let mut run_path = package_dir_path.join(&config.name);
+    let mut run_path = artifact_path.join(&config.name);
     run_path.set_extension("exe");
     match options.sub_command {
         Subcommand::Run(_) => {
             let mut child = Command::new(run_path)
-                .current_dir(&package_dir_path)
                 .spawn()
                 .unwrap();
             match config.output_type {
