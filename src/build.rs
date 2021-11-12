@@ -410,7 +410,7 @@ impl<'a> BuildEnvironment<'a> {
         }
 
         let mut package_file_paths = vec![exe_path, pdb_path];
-        if fs::metadata(&self.assets_dir_path)?.is_dir() {
+        if self.assets_dir_path.exists() && fs::metadata(&self.assets_dir_path)?.is_dir() {
             package_file_paths.push(self.assets_dir_path.clone());
         }
         Ok(())
