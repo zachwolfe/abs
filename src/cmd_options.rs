@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 use std::str::FromStr;
-use clap::Clap;
+use clap::Parser;
 
-#[derive(Clap)]
+#[derive(Parser)]
 pub struct CmdOptions {
     #[clap(subcommand)]
     pub sub_command: Subcommand,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 pub enum Subcommand {
     Init {
         project_root: Option<PathBuf>,
@@ -20,13 +20,13 @@ pub enum Subcommand {
     Kill,
 }
 
-#[derive(Clap)]
+#[derive(Parser)]
 pub struct BuildOptions {
     #[clap(default_value="debug")]
     pub compile_mode: CompileMode,
 }
 
-#[derive(Clap, Clone, Copy)]
+#[derive(Parser, Clone, Copy)]
 pub enum CompileMode {
     Debug,
     Release,

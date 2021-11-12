@@ -6,7 +6,7 @@ use std::io::{BufReader, Write};
 use std::borrow::Cow;
 use std::ffi::OsStr;
 
-use clap::Clap;
+use clap::Parser;
 
 mod build;
 mod cmd_options;
