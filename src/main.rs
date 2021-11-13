@@ -157,10 +157,10 @@ int main() {{
                 CompileMode::Debug => "debug",
                 CompileMode::Release => "release",
             };
-            let artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
+            let mut artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
+            artifact_path.push(format!("{:?}", target));
 
             let mut env = BuildEnvironment::new(
-                target,
                 &config,
                 &build_options,
                 &toolchain_paths,

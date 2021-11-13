@@ -166,17 +166,12 @@ enum PchOption {
 
 impl<'a> BuildEnvironment<'a> {
     pub fn new<'b>(
-        target: Platform,
         config: &'a ProjectConfig,
         build_options: &BuildOptions,
         toolchain_paths: &'a ToolchainPaths,
         definitions: impl IntoIterator<Item=&'b [impl AsRef<str> + 'b; 2]>,
         artifact_path: impl Into<PathBuf>,
     ) -> Result<Self, BuildError> {
-        let mut artifact_path = artifact_path.into();
-        artifact_path.push(format!("{:?}", target));
-        fs::create_dir_all(&artifact_path)?;
-
         let host = Platform::host();
         let compiler_flags = match host.os() {
             Os::Windows => {
@@ -256,6 +251,7 @@ impl<'a> BuildEnvironment<'a> {
                 (flags, dependencies.build())
             }
         };
+        let artifact_path = artifact_path.into();
         let objs_path = artifact_path.join("obj");
         let src_deps_path = artifact_path.join("src_deps");
         fs::create_dir_all(&objs_path)?;
