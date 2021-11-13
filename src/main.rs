@@ -5,6 +5,7 @@ use std::io::ErrorKind as IoErrorKind;
 use std::io::{BufReader, Write};
 use std::borrow::Cow;
 use std::ffi::OsStr;
+use std::collections::HashSet;
 
 use clap::Parser;
 
@@ -112,6 +113,11 @@ int main() {{
 
             if config.supported_targets.is_empty() {
                 fail_immediate!("abs.json contains an empty list of supported targets. Please add at least one and try again.\nAvailable options: win32, win64.");
+            }
+            // TODO: speed
+            let unique_supported_targets: HashSet<_> = config.supported_targets.iter().cloned().collect();
+            if unique_supported_targets.len() < config.supported_targets.len() {
+                fail_immediate!("abs.json contains one or more duplicates in its list of supported targets. Please ensure that each target is unique.\nThe supported platforms listed are: {:?}", config.supported_targets);
             }
 
             let host = Platform::host();
