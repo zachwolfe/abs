@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use clap::Parser;
 
-use super::proj_config::Platform;
+use super::proj_config::{Platform, OutputType};
 
 #[derive(Parser)]
 pub struct CmdOptions {
@@ -14,6 +14,9 @@ pub struct CmdOptions {
 pub enum Subcommand {
     Init {
         project_root: Option<PathBuf>,
+
+        #[clap(short, long, default_value="console_app")]
+        output_type: OutputType,
     },
     Build(BuildOptions),
     Run(BuildOptions),
@@ -88,5 +91,12 @@ impl From<RawTarget> for Target {
             RawTarget::All => Target::All,
             RawTarget::Host => Target::Host,
         }
+    }
+}
+
+impl FromStr for OutputType {
+    type Err = serde_json::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(&format!(r#""{}""#, s))
     }
 }

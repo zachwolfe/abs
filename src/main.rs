@@ -55,7 +55,7 @@ fn main() {
         }}
     }
     let (config, artifact_path, toolchain_paths) = match &options.sub_command {
-        Subcommand::Init { project_root } => {
+        Subcommand::Init { project_root, output_type } => {
             let project_root: Cow<Path> = project_root.as_ref()
                 .map(|path| Cow::from(path.as_path()))
                 .unwrap_or_else(||
@@ -67,13 +67,17 @@ fn main() {
             if config_path.is_file() {
                 fail_immediate!("ABS project already exists.");
             } else {
+                let link_libraries = match output_type {
+                    OutputType::ConsoleApp | OutputType::DynamicLibrary => vec![],
+                    OutputType::GuiApp => vec!["user32.lib".to_string(), "comctl32.lib".to_string()],
+                };
                 let config = ProjectConfig {
                     name: project_root.file_name().unwrap()
                         .to_str().expect("Project name must be representable in UTF-8")
                         .to_string(),
                     cxx_options: CxxOptions::default(),
-                    output_type: OutputType::ConsoleApp,
-                    link_libraries: vec![],
+                    output_type: *output_type,
+                    link_libraries,
                     supported_targets: vec![Platform::Win32, Platform::Win64],
                 };
                 let project_file = File::create(&config_path)
@@ -84,15 +88,97 @@ fn main() {
                 fs::create_dir_all(&src_path).unwrap();
                 src_path.push("main.cpp");
                 let mut file = fs::File::create(&src_path).unwrap();
-                write!(
-                    file,
+                match output_type {
+                    OutputType::ConsoleApp => {
+                        write!(
+                            file,
 r##"#include <stdio.h>
 
 int main() {{
     printf("Hello, world!\n");
 }}
 "##
-                ).unwrap();
+                        ).unwrap();
+                    },
+                    OutputType::GuiApp => {
+                        write!(
+                            file,
+r##"#include <windows.h>
+#include <commctrl.h>
+
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {{
+    InitCommonControls();
+
+    const wchar_t CLASS_NAME[] = L"{0} Window Class";
+    WNDCLASS wc = {{
+        .lpfnWndProc = WindowProc,
+        .hInstance = hInstance,
+        .hCursor = LoadCursor(nullptr, IDC_ARROW),
+        .lpszClassName = CLASS_NAME,
+    }};
+    RegisterClass(&wc);
+
+    HWND hwnd = CreateWindowEx(
+        0,
+        CLASS_NAME,
+        L"{0}",
+        WS_OVERLAPPEDWINDOW,
+
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+
+        NULL,
+        NULL,
+        hInstance,
+        NULL
+    );
+    if(hwnd == NULL) return 0;
+
+    ShowWindow(hwnd, nCmdShow);
+
+    MSG msg = {{}};
+    while(true) {{
+        while(PeekMessage(&msg, hwnd, 0, 0, PM_REMOVE)) {{
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }}
+    }}
+}}
+
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {{
+    switch(uMsg) {{
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_PAINT:
+        {{
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+
+            FillRect(hdc, &ps.rcPaint, (HBRUSH) (COLOR_WINDOW+1));
+            EndPaint(hwnd, &ps);
+            return 0;
+        }}
+    }}
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}}
+"##,
+                            config.name,
+                        ).unwrap()
+                    },
+                    OutputType::DynamicLibrary => {
+                        write!(
+                            file,
+r##"#include <windows.h>
+
+__declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved) {{
+    return TRUE;
+}}
+"##,
+                        ).unwrap();
+                    }
+                }
                 return;
             }
         },
