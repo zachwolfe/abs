@@ -8,6 +8,7 @@ use std::os::windows::prelude::*;
 use std::collections::HashMap;
 use std::array::IntoIter;
 use std::time::SystemTime;
+use std::iter::once;
 
 use serde::Deserialize;
 
@@ -25,6 +26,8 @@ pub struct ToolchainPaths {
 pub struct BuildEnvironment<'a> {
     compiler_flags: Vec<OsString>,
     linker_flags: Vec<OsString>,
+
+    config_path: PathBuf,
 
     linker_lib_dependencies: Vec<PathBuf>,
 
@@ -167,6 +170,7 @@ enum PchOption {
 impl<'a> BuildEnvironment<'a> {
     pub fn new<'b>(
         config: &'a ProjectConfig,
+        config_path: impl Into<PathBuf>,
         build_options: &BuildOptions,
         toolchain_paths: &'a ToolchainPaths,
         definitions: impl IntoIterator<Item=&'b [impl AsRef<str> + 'b; 2]>,
@@ -261,6 +265,8 @@ impl<'a> BuildEnvironment<'a> {
             compiler_flags,
             linker_flags,
 
+            config_path: config_path.into(),
+
             linker_lib_dependencies,
 
             toolchain_paths,
@@ -310,9 +316,14 @@ impl<'a> BuildEnvironment<'a> {
         artifact_paths: impl IntoIterator<Item=impl AsRef<Path>> + Clone,
         mut filter: impl FnMut(&Path) -> bool,
     ) -> io::Result<bool> {
+        // If the config file has changed, I want to rebuild the whole project, so unconditionally add it
+        // as a dependency.
+        let config_path = self.config_path.clone();
+        let config_edit_time = self.edit_time(config_path, u64::MAX);
         // TODO: shouldn't really be necessary to collect in a Vec here.
         let dependencies: Result<Vec<_>, _> = dependency_paths.into_iter()
             .map(|path| self.edit_time(path, u64::MAX))
+            .chain(once(config_edit_time))
             .collect();
         let dependencies = dependencies?;
         let newest_dependency = dependencies.into_iter().max().unwrap_or(0u64);

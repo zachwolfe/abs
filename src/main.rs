@@ -183,7 +183,8 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
             }
         },
         Subcommand::Build(build_options) | Subcommand::Run(build_options) | Subcommand::Debug(build_options) => {
-            let config_file = match File::open("abs.json") {
+            let config_path = PathBuf::from("abs.json");
+            let config_file = match File::open(&config_path) {
                 Ok(file) => BufReader::new(file),
                 Err(error) => fail_immediate!("Unable to read project file in current working directory: {}.", error),
             };
@@ -209,7 +210,7 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
                 fail_immediate!("abs.json contains one or more duplicates in its list of supported targets. Please ensure that each target is unique.\nThe supported platforms listed are: {:?}", config.supported_targets);
             }
 
-            fn build(target: Platform, build_options: &BuildOptions, config: &ProjectConfig) -> (PathBuf, ToolchainPaths) {
+            fn build(target: Platform, build_options: &BuildOptions, config: &ProjectConfig, config_path: &Path) -> (PathBuf, ToolchainPaths) {
                 let mode = match build_options.compile_mode {
                     CompileMode::Debug => "debug",
                     CompileMode::Release => "release",
@@ -223,6 +224,7 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
     
                 let mut env = BuildEnvironment::new(
                     config,
+                    config_path,
                     build_options,
                     &toolchain_paths,
                     // TODO: make these configurable
@@ -251,7 +253,7 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
                         fail_immediate!("Target `all` is not valid for `{}` subcommand. Please use the `build` subcommand instead.", sub_command_name);
                     } else {
                         for &supported_target in &config.supported_targets {
-                            build(supported_target, build_options, &config);
+                            build(supported_target, build_options, &config, &config_path);
                         }
                         return;
                     }
@@ -289,7 +291,7 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
                             }
                         }
                     }
-                    let (artifact_path, toolchain_paths) = build(target, build_options, &config);
+                    let (artifact_path, toolchain_paths) = build(target, build_options, &config, &config_path);
                     (config, artifact_path, toolchain_paths)
                 },
                 Target::Platform(target) => {
@@ -306,7 +308,7 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
                         fail_immediate!("`{}` subcommand cannot proceed because your host platform, {:?}, is not compatible with the supplied target {:?}. Please use the `build` subcommand instead.", sub_command_name, host, target);
                     }
 
-                    let (artifact_path, toolchain_paths) = build(target, build_options, &config);
+                    let (artifact_path, toolchain_paths) = build(target, build_options, &config, &config_path);
                     (config, artifact_path, toolchain_paths)
                 }
             }
