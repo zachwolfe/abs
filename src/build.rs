@@ -7,6 +7,8 @@ use std::ffi::{OsStr, OsString};
 use std::os::windows::prelude::*;
 use std::collections::HashMap;
 use std::array::IntoIter;
+use std::time::SystemTime;
+
 use serde::Deserialize;
 
 use super::proj_config::{Platform, Os, Arch, ProjectConfig, CxxStandard, OutputType};
@@ -640,8 +642,22 @@ impl ToolchainPaths {
             .max()
             .unwrap();
         path.push(year.to_string());
-        // TODO: principled way of choosing edition
-        path.push("Preview");
+        // Pick the name of the newest folder ("Community", "Preview", etc.).
+        // TODO: more principled way of choosing edition.
+        let mut edition = OsString::from("Community");
+        let mut newest_edition_time = SystemTime::UNIX_EPOCH;
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                let created = metadata.created()?;
+                if created > newest_edition_time {
+                    newest_edition_time = created;
+                    edition = entry.file_name();
+                }
+            }
+        }
+        path.push(edition);
         let edition = path.clone();
 
         path.push("VC");
