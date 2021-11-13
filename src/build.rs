@@ -218,20 +218,18 @@ impl<'a> BuildEnvironment<'a> {
                     "/debug".into(),
                 ];
                 flags.push(
-                    format!(
-                        "/SUBSYSTEM:{}",
-                        match config.output_type {
-                            OutputType::GuiApp => "WINDOWS",
-                            OutputType::ConsoleApp => "CONSOLE",
-                        },
-                    ).into()
+                    match config.output_type {
+                        OutputType::GuiApp => "/SUBSYSTEM:WINDOWS",
+                        OutputType::ConsoleApp => "/SUBSYSTEM:CONSOLE",
+                        OutputType::DynamicLibrary => "/DLL",
+                    }.into()
                 );
                 match config.output_type {
                     OutputType::GuiApp => {
                         flags.push("/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0'
                         processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'".into());
                     }
-                    OutputType::ConsoleApp => {},
+                    OutputType::ConsoleApp | OutputType::DynamicLibrary => {},
                 }
                 let mut dependencies = DependencyBuilder::default();
                 // TODO: Speed!!!
@@ -385,31 +383,35 @@ impl<'a> BuildEnvironment<'a> {
         let mut obj_paths = Vec::new();
         self.compile_directory(&paths, &mut obj_paths, pch)?;
 
-        let exe_name = format!("{}.exe", self.config.name);
+        let product_is_executable = matches!(self.config.output_type, OutputType::ConsoleApp | OutputType::GuiApp);
+        let product_name = format!("{}.{}", self.config.name, if product_is_executable { "exe" } else { "dll" });
         let pdb_name = format!("{}.pdb", self.config.name);
-        let exe_path = artifact_path.as_ref().join(&exe_name);
+        let product_path = artifact_path.as_ref().join(&product_name);
         let pdb_path = artifact_path.as_ref().join(&pdb_name);
 
         let dependencies: Vec<_> = obj_paths.clone().iter().cloned()
             .chain(self.linker_lib_dependencies.iter().cloned())
             .collect();
 
-        super::kill_debugger();
-        super::kill_process(&exe_name);
-
-        // File locks may continue to be held on the exe for some time after it is terminated,
-        // causing linking to fail. So, while the exit code is 1, keep trying to kill.
-        //
-        // This is kind of a hack, but it seems to work well enough.
-        while super::kill_debugger() == Some(1) {}
-        while super::kill_process(&exe_name) == Some(1) {}
+        if !matches!(self.config.output_type, OutputType::DynamicLibrary) {
+            super::kill_debugger();
+            super::kill_process(&product_name);
+    
+            // File locks may continue to be held on the product for some time after it is
+            // terminated/unloaded, causing linking to fail. So, while the exit code is 1, keep trying
+            // to kill.
+            //
+            // This is kind of a hack, but it seems to work well enough.
+            while super::kill_debugger() == Some(1) {}
+            while super::kill_process(&product_name) == Some(1) {}
+        }
             
-        let should_relink = self.should_build_artifact(&dependencies, &exe_path)?;
+        let should_relink = self.should_build_artifact(&dependencies, &product_path)?;
         if should_relink {
-            self.link(&exe_path, obj_paths)?;
+            self.link(&product_path, obj_paths)?;
         }
 
-        let mut package_file_paths = vec![exe_path, pdb_path];
+        let mut package_file_paths = vec![product_path, pdb_path];
         if self.assets_dir_path.exists() && fs::metadata(&self.assets_dir_path)?.is_dir() {
             package_file_paths.push(self.assets_dir_path.clone());
         }

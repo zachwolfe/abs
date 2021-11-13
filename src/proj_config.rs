@@ -48,6 +48,7 @@ impl Default for CxxStandard {
 pub enum OutputType {
     GuiApp,
     ConsoleApp,
+    DynamicLibrary,
 }
 
 pub enum Host {
