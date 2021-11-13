@@ -6,6 +6,7 @@ pub struct ProjectConfig {
     pub cxx_options: CxxOptions,
     pub output_type: OutputType,
     pub link_libraries: Vec<String>,
+    pub supported_targets: Vec<Platform>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -51,6 +52,51 @@ pub enum OutputType {
     DynamicLibrary,
 }
 
-pub enum Host {
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all="snake_case")]
+pub enum Platform {
+    Win32, Win64,
+}
+
+impl Platform {
+    pub fn host() -> Self {
+        if cfg!(target_os = "windows") {
+            if cfg!(target_pointer_width = "32") {
+                Self::Win32
+            } else if cfg!(target_pointer_width = "64") {
+                Self::Win64
+            } else {
+                panic!("Unsupported bit width of host platform.");
+            }
+        } else {
+            panic!("Unsupported target os.");
+        }
+    }
+
+    pub fn os(&self) -> Os {
+        Os::Windows
+    }
+
+    pub fn architecture(&self) -> Arch {
+        match self {
+            Platform::Win32 => Arch::X86,
+            Platform::Win64 => Arch::X64,
+        }
+    }
+
+    /// Can devices of type `self` run software built for `other`?
+    pub fn is_backwards_compatible_with(&self, other: Platform) -> bool {
+        match self {
+            Platform::Win32 => matches!(other, Platform::Win32),
+            Platform::Win64 => matches!(other.os(), Os::Windows),
+        }
+    }
+}
+
+pub enum Os {
     Windows,
+}
+
+pub enum Arch {
+    X86, X64,
 }

@@ -12,7 +12,7 @@ mod build;
 mod cmd_options;
 mod proj_config;
 
-use proj_config::{ProjectConfig, OutputType, Host, CxxOptions};
+use proj_config::{ProjectConfig, OutputType, CxxOptions, Platform};
 use cmd_options::{CmdOptions, CompileMode, Subcommand};
 use build::{BuildEnvironment, ToolchainPaths};
 
@@ -28,11 +28,8 @@ fn kill_debugger() -> Option<i32> {
     kill_process("devenv.exe")
 }
 
+#[cfg(target_os = "windows")]
 fn main() {
-    if !cfg!(target_os = "windows") {
-        panic!("Unsupported host OS: only Windows is supported.");
-    }
-
     let options = CmdOptions::parse();
     macro_rules! _task_failed {
         () => {
@@ -74,6 +71,7 @@ fn main() {
                     cxx_options: CxxOptions::default(),
                     output_type: OutputType::ConsoleApp,
                     link_libraries: vec![],
+                    supported_targets: vec![Platform::Win32, Platform::Win64],
                 };
                 let project_file = File::create(&config_path)
                     .unwrap_or_else(|error| fail_immediate!("Unable to open project file for writing: {}.", error));
@@ -112,7 +110,47 @@ int main() {{
                 fail_immediate!("`{}` subcommand not supported for dynamic library projects. Consider using the `build` subcommand and linking the result in another executable.", sub_command_name);
             }
 
-            let toolchain_paths = ToolchainPaths::find().unwrap();
+            if config.supported_targets.is_empty() {
+                fail_immediate!("abs.json contains an empty list of supported targets. Please add at least one and try again.\nAvailable options: win32, win64.");
+            }
+
+            let host = Platform::host();
+
+            // By default, set target = the host.
+            let mut target = host;
+            let mut can_run_on_host = true;
+            // If the host isn't a supported target, then pick target with which the host is
+            // backwards compatible.
+            if !config.supported_targets.contains(&target) {
+                can_run_on_host = false;
+                let compatible = config.supported_targets.iter().cloned()
+                    .find(|&supported_target| host.is_backwards_compatible_with(supported_target));
+                if let Some(compatible) = compatible {
+                    target = compatible;
+                    can_run_on_host = true;
+                }
+            }
+
+            if !can_run_on_host {
+                if matches!(options.sub_command, Subcommand::Run(_) | Subcommand::Debug(_)) {
+                    let sub_command_name = match options.sub_command {
+                        Subcommand::Run(_) => "run",
+                        Subcommand::Debug(_) => "debug",
+                        _ => unreachable!(),
+                    };
+                    fail_immediate!("`{}` subcommand cannot proceed because your host platform, {:?}, is not compatible with any of the supported targets in this project's abs.json.\nThe supported platforms listed are: {:?}", sub_command_name, host, config.supported_targets);
+                } else {
+                    // Don't need to run, so if there is only one target supported, choose it regardless
+                    // of compatibility.
+                    if config.supported_targets.len() == 1 {
+                        target = config.supported_targets[0];
+                    } else {
+                        fail_immediate!("Unable to choose a target platform, because there is more than one supported target in this project's abs.json, and none of them are compatible with your host. Please consider specifying a target on the command line (not yet supported).\nThe supported platforms listed are: {:?}", config.supported_targets);
+                    }
+                }
+            }
+
+            let toolchain_paths = ToolchainPaths::find(target).unwrap();
             
             // Create abs/debug or abs/release, if it doesn't exist already
             let artifact_subdirectory = match build_options.compile_mode {
@@ -122,15 +160,16 @@ int main() {{
             let artifact_path: PathBuf = ["abs", artifact_subdirectory].iter().collect();
 
             let mut env = BuildEnvironment::new(
-                Host::Windows,
+                target,
                 &config,
                 &build_options,
                 &toolchain_paths,
+                // TODO: make these configurable
                 &[["_WINDOWS", ""], ["WIN32", ""], ["UNICODE", ""], ["_USE_MATH_DEFINES", ""]],
                 &artifact_path,
             ).unwrap();
 
-            if let Some(error) = env.build(&artifact_path).err() {
+            if let Some(error) = env.build().err() {
                 env.fail(error);
             }
 

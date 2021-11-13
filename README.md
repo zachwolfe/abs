@@ -23,7 +23,8 @@ A dead simple build system for C++ that values convention over configuration. Cr
     "standard": "c++14"
   },
   "output_type": "gui_app",
-  "link_libraries": []
+  "link_libraries": [],
+  "supported_targets": ["win32", "win64"]
 }
 ```
 - Navigate to the project directory (if necessary)

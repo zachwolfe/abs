@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::array::IntoIter;
 use serde::Deserialize;
 
-use super::proj_config::{Host, ProjectConfig, CxxStandard, OutputType};
+use super::proj_config::{Platform, Os, Arch, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
 
 pub struct ToolchainPaths {
@@ -28,6 +28,7 @@ pub struct BuildEnvironment<'a> {
 
     toolchain_paths: &'a ToolchainPaths,
     config: &'a ProjectConfig,
+    artifact_path: PathBuf,
     src_dir_path: PathBuf,
     assets_dir_path: PathBuf,
     objs_path: PathBuf,
@@ -163,16 +164,20 @@ enum PchOption {
 
 impl<'a> BuildEnvironment<'a> {
     pub fn new<'b>(
-        host: Host,
+        target: Platform,
         config: &'a ProjectConfig,
         build_options: &BuildOptions,
         toolchain_paths: &'a ToolchainPaths,
         definitions: impl IntoIterator<Item=&'b [impl AsRef<str> + 'b; 2]>,
         artifact_path: impl Into<PathBuf>,
     ) -> Result<Self, BuildError> {
-        let artifact_path = artifact_path.into();
-        let compiler_flags = match host {
-            Host::Windows => {
+        let mut artifact_path = artifact_path.into();
+        artifact_path.push(format!("{:?}", target));
+        fs::create_dir_all(&artifact_path)?;
+
+        let host = Platform::host();
+        let compiler_flags = match host.os() {
+            Os::Windows => {
                 let mut flags: Vec<OsString> = vec![
                     "/W3".into(),
                     "/Zi".into(),
@@ -211,8 +216,8 @@ impl<'a> BuildEnvironment<'a> {
                 flags
             },
         };
-        let (linker_flags, linker_lib_dependencies) = match host {
-            Host::Windows => {
+        let (linker_flags, linker_lib_dependencies) = match host.os() {
+            Os::Windows => {
                 let mut flags: Vec<OsString> = vec![
                     "/nologo".into(),
                     "/debug".into(),
@@ -262,6 +267,7 @@ impl<'a> BuildEnvironment<'a> {
 
             toolchain_paths,
             config,
+            artifact_path,
             src_dir_path: "src".into(),
             assets_dir_path: "assets".into(),
             objs_path,
@@ -351,7 +357,7 @@ impl<'a> BuildEnvironment<'a> {
         )
     }
 
-    pub fn build(&mut self, artifact_path: impl AsRef<Path>) -> Result<(), BuildError> {
+    pub fn build(&mut self) -> Result<(), BuildError> {
         let paths = match SrcPaths::from_root(&self.src_dir_path) {
             Ok(paths) => paths,
             Err(error) => {
@@ -386,8 +392,8 @@ impl<'a> BuildEnvironment<'a> {
         let product_is_executable = matches!(self.config.output_type, OutputType::ConsoleApp | OutputType::GuiApp);
         let product_name = format!("{}.{}", self.config.name, if product_is_executable { "exe" } else { "dll" });
         let pdb_name = format!("{}.pdb", self.config.name);
-        let product_path = artifact_path.as_ref().join(&product_name);
-        let pdb_path = artifact_path.as_ref().join(&pdb_name);
+        let product_path = self.artifact_path.join(&product_name);
+        let pdb_path = self.artifact_path.join(&pdb_name);
 
         let dependencies: Vec<_> = obj_paths.clone().iter().cloned()
             .chain(self.linker_lib_dependencies.iter().cloned())
@@ -615,7 +621,7 @@ fn newest_version<P: AsRef<Path>, const N: usize>(parent: P) -> Option<PathBuf> 
 }
 
 impl ToolchainPaths {
-    pub fn find() -> Result<ToolchainPaths, BuildError> {
+    pub fn find(target: Platform) -> Result<ToolchainPaths, BuildError> {
         let mut path = PathBuf::from(r"C:\Program Files (x86)");
         let program_files = path.clone();
         path.push("Microsoft Visual Studio");
@@ -646,8 +652,10 @@ impl ToolchainPaths {
         path.push(newest_version::<_, 3>(&path).unwrap());
         let version = path.clone();
 
-        // TODO: make this configurable!!
-        let target = "x64";
+        let target = match target.architecture() {
+            Arch::X86 => "x86",
+            Arch::X64 => "x64",
+        };
 
         path.push("bin");
         if cfg!(target_pointer_width = "64") {
