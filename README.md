@@ -33,7 +33,16 @@ A dead simple build system for C++ that values convention over configuration. Cr
 - Build the project with `abs build`
 - Build and run the project with `abs run`
 - Build and then launch the project in a debugger with `abs debug`
-- For all commands that build the project, you may also add a `debug` or `release` build mode specifier. The default is `debug`.
-  - e.g., `abs build release`
+- For all commands that build the project:
+  - You may add a `debug` or `release` build mode specifier. The default is `debug`.
+    - e.g., `abs build release`
+  - You may specify the desired target platform, which can be one of the following values:
+    - one of the supported options listed in the project's abs.json file (e.g., "win32" or "win64")
+    - "all", which will build the project for all supported targets with the given release mode
+    - "host", which is the default. Will build for the host platform. If the host platform is not
+      listed in the supported target platforms for the project, ABS will attempt to select
+      a platform supported by both the host and the project. (e.g., for a Win64 host, I will choose
+      Win32 if that is in the project's list of supported targets). If no such target can be found,
+      there is an error.
 - Clean built files with `abs clean`
 - Kill the debugger with `abs kill` (because Visual Studio is too painful to close manually)
