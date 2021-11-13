@@ -646,6 +646,9 @@ impl ToolchainPaths {
         path.push(newest_version::<_, 3>(&path).unwrap());
         let version = path.clone();
 
+        // TODO: make this configurable!!
+        let target = "x64";
+
         path.push("bin");
         if cfg!(target_pointer_width = "64") {
             path.push("Hostx64");
@@ -660,7 +663,7 @@ impl ToolchainPaths {
         } else {
             panic!("Unsupported host pointer width; expected either 32 or 64.");
         }
-        path.push("x86");
+        path.push(target);
         let bin = path.clone();
 
         path.push("cl.exe");
@@ -680,7 +683,7 @@ impl ToolchainPaths {
 
         let mut path = atlmfc;
         path.push("lib");
-        path.push("x86");
+        path.push(target);
         lib_paths.push(path);
 
         let mut path = version.clone();
@@ -689,7 +692,7 @@ impl ToolchainPaths {
 
         let mut path = version;
         path.push("lib");
-        path.push("x86");
+        path.push(target);
         lib_paths.push(path);
 
         let mut path = edition;
@@ -719,7 +722,7 @@ impl ToolchainPaths {
         path.push(newest_version::<_, 4>(&path).unwrap());
         for &name in &["ucrt", "um"] {
             path.push(name);
-            path.push("x86");
+            path.push(target);
             lib_paths.push(path.clone());
             path.pop();
             path.pop();
