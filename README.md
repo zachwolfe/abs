@@ -3,7 +3,7 @@ A dead simple build system for C++ that values convention over configuration. Cr
 
 ## Current Status & Future Plans (as of November 13, 2021)
 - Only supports Windows for now; support for Apple platforms and Linux is planned, but not right away
-- Support for building 32-bit and 64-bit DLLs and GUI apps is basically good enough for my needs at this point
+- Support for building 32-bit and 64-bit DLLs and GUI apps is basically good enough for my needs at this point (modulo any undiscovered bugs)
 - Building console apps is broken
 - My code for finding the local Visual Studio installation is not very robust
 - Adding icons to an app is not yet supported
