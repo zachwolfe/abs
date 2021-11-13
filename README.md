@@ -3,10 +3,13 @@ A dead simple build system for C++ that values convention over configuration. Cr
 
 ## Current Status & Future Plans (as of November 13, 2021)
 - Only supports Windows for now; support for Apple platforms and Linux is planned, but not right away
-- Support for building 32-bit and 64-bit DLLs and GUI apps is basically good enough for my needs at this point (modulo any undiscovered bugs)
-- Building console apps is broken
-- My code for finding the local Visual Studio installation is not very robust
-- Adding icons to an app is not yet supported
+- Supports building GUI apps, console apps and dynamic libraries
+  - Both 32-bit and 64-bit
+- Limitations:
+  - My code for finding the local Visual Studio installation is not very robust
+  - Adding icons to an app is not yet supported
+  - The output is not as pretty as some other build systems
+  - Not all error messages are very helpful
 - I currently use a very minimal JSON manifest format for project-specific configuration. This format *might* be replaced with build scripts written in C++. This could enable things like:
   - Building code written in programming languages other than C++
   - Domain-specific or platform-specific preprocessing, like generating C++/WinRT projections for the Windows API, assembling application bundles for macOS, etc.
@@ -16,7 +19,7 @@ A dead simple build system for C++ that values convention over configuration. Cr
 ## Usage
 - From ABS' root directory, install ABS using `cargo install --path .`
 - Create a project with `abs init [path (optional)]`
-  - A project consists of a human-editable `abs.json` project file and a `src` directory with source files, and nothing else. The following is an example project file:
+  - A project consists of a human-editable `abs.json` project file, a `src` directory with source files, and an optional `assets` directory which will be copied to the same location as the final `exe` or `dll`. The following is an example project file:
 ```json
 {
   "name": "my_app",
@@ -38,7 +41,7 @@ A dead simple build system for C++ that values convention over configuration. Cr
     - e.g., `abs build release`
   - You may specify the desired target platform, which can be one of the following values:
     - one of the supported options listed in the project's abs.json file (e.g., "win32" or "win64")
-    - "all", which will build the project for all supported targets with the given release mode
+    - "all", which will build the project with the given release mode for all supported targets
     - "host", which is the default. Will build for the host platform. If the host platform is not
       listed in the supported target platforms for the project, ABS will attempt to select
       a platform supported by both the host and the project. (e.g., for a Win64 host, I will choose
