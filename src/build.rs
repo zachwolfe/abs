@@ -647,7 +647,19 @@ impl ToolchainPaths {
         let version = path.clone();
 
         path.push("bin");
-        path.push("Hostx86");
+        if cfg!(target_pointer_width = "64") {
+            path.push("Hostx64");
+            // If host is 64-bit, but the 64-bit tools aren't installed, fallback to 32-bit.
+            // I don't know if this case is likely in the real world, but I suspect probably not?
+            if !path.exists() {
+                path.pop();
+                path.push("Hostx86");
+            }
+        } else if cfg!(target_pointer_width = "32") {
+            path.push("Hostx86");
+        } else {
+            panic!("Unsupported host pointer width; expected either 32 or 64.");
+        }
         path.push("x86");
         let bin = path.clone();
 
