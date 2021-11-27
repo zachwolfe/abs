@@ -16,11 +16,10 @@ use super::proj_config::{Platform, Os, Arch, ProjectConfig, CxxStandard, OutputT
 use super::cmd_options::{BuildOptions, CompileMode};
 
 pub struct ToolchainPaths {
-    pub compiler_path: PathBuf,
-    pub linker_path: PathBuf,
     pub debugger_path: PathBuf,
     pub include_paths: Vec<PathBuf>,
     pub lib_paths: Vec<PathBuf>,
+    pub bin_paths: Vec<PathBuf>,
 }
 
 pub struct BuildEnvironment<'a> {
@@ -28,6 +27,7 @@ pub struct BuildEnvironment<'a> {
     linker_flags: Vec<OsString>,
 
     config_path: PathBuf,
+    manifest_path: Option<PathBuf>,
 
     linker_lib_dependencies: Vec<PathBuf>,
 
@@ -124,9 +124,15 @@ impl DependencyBuilder {
     fn build(self) -> Vec<PathBuf> { self.dependencies }
 }
 
-fn run_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, error: BuildError) -> Result<(), BuildError> {
+fn run_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, bin_paths: &[PathBuf], error: BuildError) -> Result<(), BuildError> {
+    let mut path = OsString::from("%PATH%");
+    for i in 0..bin_paths.len() {
+        path.push(";");
+        path.push(bin_paths[i].as_os_str());
+    }
     let code = Command::new(cmd)
         .args(args)
+        .env("PATH", path)
         .spawn()?
         .wait()?;
 
@@ -157,7 +163,7 @@ fn get_ps_args(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<O
 
 #[allow(unused)]
 fn run_ps_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, error: BuildError) -> Result<(), BuildError> {
-    run_cmd("powershell", get_ps_args(cmd, args), error)
+    run_cmd("powershell", get_ps_args(cmd, args), &[], error)
 }
 
 #[derive(Copy, Clone)]
@@ -177,6 +183,11 @@ impl<'a> BuildEnvironment<'a> {
         artifact_path: impl Into<PathBuf>,
     ) -> Result<Self, BuildError> {
         let host = Platform::host();
+        let config_path = config_path.into();
+        let mut project_path = config_path.clone();
+        project_path.pop();
+        let manifest_path = project_path.join("windows_manifest.xml");
+        let has_manifest = manifest_path.exists();
         let compiler_flags = match host.os() {
             Os::Windows => {
                 let mut flags: Vec<OsString> = vec![
@@ -230,12 +241,20 @@ impl<'a> BuildEnvironment<'a> {
                         OutputType::DynamicLibrary => "/DLL",
                     }.into()
                 );
-                match config.output_type {
-                    OutputType::GuiApp => {
-                        flags.push("/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0'
-                        processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'".into());
+                flags.push("/manifest:embed".into());
+                if has_manifest {
+                    let mut flag = OsString::from("/manifestinput:");
+                    flag.push(&manifest_path);
+                    flags.push(flag);
+                    flags.push("/manifestuac:no".into());
+                } else {
+                    match config.output_type {
+                        OutputType::GuiApp => {
+                            flags.push("/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0'
+                            processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'".into());
+                        }
+                        OutputType::ConsoleApp | OutputType::DynamicLibrary => {},
                     }
-                    OutputType::ConsoleApp | OutputType::DynamicLibrary => {},
                 }
                 let mut dependencies = DependencyBuilder::default();
                 // TODO: Speed!!!
@@ -265,7 +284,12 @@ impl<'a> BuildEnvironment<'a> {
             compiler_flags,
             linker_flags,
 
-            config_path: config_path.into(),
+            config_path,
+            manifest_path: if has_manifest {
+                Some(manifest_path)
+            } else {
+                None
+            },
 
             linker_lib_dependencies,
 
@@ -406,6 +430,7 @@ impl<'a> BuildEnvironment<'a> {
 
         let dependencies: Vec<_> = obj_paths.clone().iter().cloned()
             .chain(self.linker_lib_dependencies.iter().cloned())
+            .chain(self.manifest_path.iter().cloned())
             .collect();
 
         if !matches!(self.config.output_type, OutputType::DynamicLibrary) {
@@ -558,7 +583,7 @@ impl<'a> BuildEnvironment<'a> {
             )
         );
         args.push(path.as_os_str().to_owned());
-        run_cmd(&self.toolchain_paths.compiler_path, &args, BuildError::CompilerError)?;
+        run_cmd("cl.exe", &args, &self.toolchain_paths.bin_paths, BuildError::CompilerError)?;
 
         Ok(())
     }
@@ -582,7 +607,7 @@ impl<'a> BuildEnvironment<'a> {
         for path in &self.config.link_libraries {
             args.push(path.into());
         }
-        run_cmd(&self.toolchain_paths.linker_path, &args, BuildError::LinkerError)
+        run_cmd("link.exe", &args, &self.toolchain_paths.bin_paths, BuildError::LinkerError)
     }
 }
 
@@ -667,9 +692,7 @@ impl ToolchainPaths {
         path.push(edition);
         let edition = path.clone();
 
-        path.push("VC");
-        path.push("Tools");
-        path.push("MSVC");
+        path.extend(["VC", "Tools", "MSVC"]);
 
         // TODO: error handling
         path.push(newest_version::<_, 3>(&path).unwrap());
@@ -679,30 +702,20 @@ impl ToolchainPaths {
             Arch::X86 => "x86",
             Arch::X64 => "x64",
         };
-
-        path.push("bin");
-        if cfg!(target_pointer_width = "64") {
-            path.push("Hostx64");
-            // If host is 64-bit, but the 64-bit tools aren't installed, fallback to 32-bit.
-            // I don't know if this case is likely in the real world, but I suspect probably not?
-            if !path.exists() {
-                path.pop();
-                path.push("Hostx86");
-            }
+        let host = if cfg!(target_pointer_width = "64") {
+            "x64"
         } else if cfg!(target_pointer_width = "32") {
-            path.push("Hostx86");
+            "x86"
         } else {
             panic!("Unsupported host pointer width; expected either 32 or 64.");
-        }
+        };
+
+        let mut bin_paths = Vec::new();
+
+        path.push("bin");
+        path.push(format!("Host{}", host));
         path.push(target);
-        let bin = path.clone();
-
-        path.push("cl.exe");
-        let compiler_path = path;
-
-        let mut path = bin;
-        path.push("link.exe");
-        let linker_path = path;
+        bin_paths.push(path);
 
         let mut lib_paths = Vec::new();
         let mut path = version.clone();
@@ -759,13 +772,19 @@ impl ToolchainPaths {
             path.pop();
         }
 
+        let mut path = win10.clone();
+        path.push("bin");
+        // TODO: error handling
+        path.push(newest_version::<_, 4>(&path).unwrap());
+        path.push(host);
+        bin_paths.push(path);
+
         Ok(
             ToolchainPaths {
-                compiler_path,
-                linker_path,
                 debugger_path,
                 include_paths,
                 lib_paths,
+                bin_paths,
             }
         )
     }
