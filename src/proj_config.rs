@@ -50,6 +50,7 @@ pub enum OutputType {
     GuiApp,
     ConsoleApp,
     DynamicLibrary,
+    StaticLibrary,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, clap::Parser)]

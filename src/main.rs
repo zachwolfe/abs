@@ -68,7 +68,7 @@ fn main() {
                 fail_immediate!("ABS project already exists.");
             } else {
                 let link_libraries = match output_type {
-                    OutputType::ConsoleApp | OutputType::DynamicLibrary => vec![],
+                    OutputType::ConsoleApp | OutputType::DynamicLibrary | OutputType::StaticLibrary => vec![],
                     OutputType::GuiApp => vec!["user32.lib".to_string(), "comctl32.lib".to_string()],
                 };
                 let config = ProjectConfig {
@@ -177,7 +177,18 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
 }}
 "##,
                         ).unwrap();
-                    }
+                    },
+                    OutputType::StaticLibrary => {
+                        write!(
+                            file,
+r##"#include <stdio.h>
+
+void print_hello_world() {{
+    printf("Hello, world!");
+}}
+"##,
+                        ).unwrap();
+                    },
                 }
                 return;
             }
@@ -344,7 +355,7 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
                     // Only wait for the process to complete if this is a console app
                     child.wait().unwrap();
                 },
-                OutputType::GuiApp | OutputType::DynamicLibrary => {}
+                OutputType::GuiApp | OutputType::DynamicLibrary | OutputType::StaticLibrary => {}
             }
         },
         Subcommand::Debug(_) => {

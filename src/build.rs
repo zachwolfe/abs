@@ -351,8 +351,12 @@ impl<'a> BuildEnvironment<'a> {
         let mut obj_paths = Vec::new();
         self.compile_directory(&paths, &mut obj_paths, pch)?;
 
-        let product_is_executable = matches!(self.config.output_type, OutputType::ConsoleApp | OutputType::GuiApp);
-        let product_name = format!("{}.{}", self.config.name, if product_is_executable { "exe" } else { "dll" });
+        let extension = match self.config.output_type {
+            OutputType::ConsoleApp | OutputType::GuiApp => "exe",
+            OutputType::DynamicLibrary => "dll",
+            OutputType::StaticLibrary => "lib",
+        };
+        let product_name = format!("{}.{}", self.config.name, extension);
         let pdb_name = format!("{}.pdb", self.config.name);
         let product_path = self.artifact_path.join(&product_name);
         let pdb_path = self.artifact_path.join(&pdb_name);
@@ -362,18 +366,16 @@ impl<'a> BuildEnvironment<'a> {
             .chain(self.manifest_path.iter().cloned())
             .collect();
 
-        if !matches!(self.config.output_type, OutputType::DynamicLibrary) {
-            super::kill_debugger();
-            super::kill_process(&product_name);
-    
-            // File locks may continue to be held on the product for some time after it is
-            // terminated/unloaded, causing linking to fail. So, while the exit code is 1, keep trying
-            // to kill.
-            //
-            // This is kind of a hack, but it seems to work well enough.
-            while super::kill_debugger() == Some(1) {}
-            while super::kill_process(&product_name) == Some(1) {}
-        }
+        super::kill_debugger();
+        super::kill_process(&product_name);
+
+        // File locks may continue to be held on the product for some time after it is
+        // terminated/unloaded, causing linking to fail. So, while the exit code is 1, keep trying
+        // to kill.
+        //
+        // This is kind of a hack, but it seems to work well enough.
+        while super::kill_debugger() == Some(1) {}
+        while super::kill_process(&product_name) == Some(1) {}
             
         let should_relink = self.should_build_artifact(&dependencies, &product_path)?;
         if should_relink {
@@ -382,6 +384,12 @@ impl<'a> BuildEnvironment<'a> {
 
         let mut package_file_paths = vec![product_path, pdb_path];
         if self.assets_dir_path.exists() && fs::metadata(&self.assets_dir_path)?.is_dir() {
+            if matches!(self.config.output_type, OutputType::StaticLibrary) {
+                println!("Warning: {} has an assets directory, which is unsupported in static library projects. It will be ignored.", self.config.name);
+                if let Ok(canon) = self.assets_dir_path.canonicalize() {
+                    println!("    assets directory found at path: \"{}\"\n", canon.as_os_str().to_string_lossy());
+                }
+            }
             package_file_paths.push(self.assets_dir_path.clone());
         }
         Ok(())
@@ -569,16 +577,20 @@ impl<'a> BuildEnvironment<'a> {
             Os::Windows => {
                 let mut flags: Vec<OsString> = vec![
                     "/nologo".into(),
-                    "/debug".into(),
                 ];
-                flags.push(
-                    match self.config.output_type {
-                        OutputType::GuiApp => "/SUBSYSTEM:WINDOWS",
-                        OutputType::ConsoleApp => "/SUBSYSTEM:CONSOLE",
-                        OutputType::DynamicLibrary => "/DLL",
-                    }.into()
-                );
-                flags.push("/manifest:embed".into());
+                let output_flag = match self.config.output_type {
+                    OutputType::GuiApp => Some("/SUBSYSTEM:WINDOWS"),
+                    OutputType::ConsoleApp => Some("/SUBSYSTEM:CONSOLE"),
+                    OutputType::DynamicLibrary => Some("/DLL"),
+                    OutputType::StaticLibrary => None,
+                };
+                if let Some(output_flag) = output_flag {
+                    flags.push(output_flag.into());
+                }
+                if !matches!(self.config.output_type, OutputType::StaticLibrary) {
+                    flags.push("/manifest:embed".into());
+                    flags.push("/debug".into());
+                }
                 if let Some(manifest_path) = &self.manifest_path {
                     let mut flag = OsString::from("/manifestinput:");
                     flag.push(manifest_path);
@@ -590,7 +602,7 @@ impl<'a> BuildEnvironment<'a> {
                             flags.push("/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0'
                             processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'".into());
                         }
-                        OutputType::ConsoleApp | OutputType::DynamicLibrary => {},
+                        OutputType::ConsoleApp | OutputType::DynamicLibrary | OutputType::StaticLibrary => {},
                     }
                 }
                 for path in &self.toolchain_paths.lib_paths {
@@ -608,10 +620,14 @@ impl<'a> BuildEnvironment<'a> {
         for path in obj_paths {
             args.push(path.as_ref().as_os_str().to_owned());
         }
-        for path in &self.config.link_libraries {
-            args.push(path.into());
+        if matches!(self.config.output_type, OutputType::StaticLibrary) {
+            run_cmd("lib.exe", &args, &self.toolchain_paths.bin_paths, BuildError::LinkerError)
+        } else {
+            for path in &self.config.link_libraries {
+                args.push(path.into());
+            }
+            run_cmd("link.exe", &args, &self.toolchain_paths.bin_paths, BuildError::LinkerError)
         }
-        run_cmd("link.exe", &args, &self.toolchain_paths.bin_paths, BuildError::LinkerError)
     }
 }
 
