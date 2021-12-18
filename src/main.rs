@@ -228,7 +228,7 @@ __declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, L
                     build_options,
                     &toolchain_paths,
                     // TODO: make these configurable
-                    &[["_WINDOWS", ""], ["WIN32", ""], ["UNICODE", ""], ["_USE_MATH_DEFINES", ""]],
+                    &[("_WINDOWS", ""), ("WIN32", ""), ("UNICODE", ""), ("_USE_MATH_DEFINES", "")],
                     &artifact_path,
                 ).unwrap();
     

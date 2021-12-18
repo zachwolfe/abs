@@ -23,16 +23,15 @@ pub struct ToolchainPaths {
 }
 
 pub struct BuildEnvironment<'a> {
-    compiler_flags: Vec<OsString>,
-    linker_flags: Vec<OsString>,
-
     config_path: PathBuf,
     manifest_path: Option<PathBuf>,
 
     linker_lib_dependencies: Vec<PathBuf>,
-
+    
     toolchain_paths: &'a ToolchainPaths,
     config: &'a ProjectConfig,
+    build_options: &'a BuildOptions,
+    definitions: &'a [(&'a str, &'a str)],
     artifact_path: PathBuf,
     src_dir_path: PathBuf,
     assets_dir_path: PathBuf,
@@ -174,12 +173,12 @@ enum PchOption {
 }
 
 impl<'a> BuildEnvironment<'a> {
-    pub fn new<'b>(
+    pub fn new(
         config: &'a ProjectConfig,
         config_path: impl Into<PathBuf>,
-        build_options: &BuildOptions,
+        build_options: &'a BuildOptions,
         toolchain_paths: &'a ToolchainPaths,
-        definitions: impl IntoIterator<Item=&'b [impl AsRef<str> + 'b; 2]>,
+        definitions: &'a [(&'a str, &'a str)],
         artifact_path: impl Into<PathBuf>,
     ) -> Result<Self, BuildError> {
         let host = Platform::host();
@@ -188,74 +187,8 @@ impl<'a> BuildEnvironment<'a> {
         project_path.pop();
         let manifest_path = project_path.join("windows_manifest.xml");
         let has_manifest = manifest_path.exists();
-        let compiler_flags = match host.os() {
+        let linker_lib_dependencies = match host.os() {
             Os::Windows => {
-                let mut flags: Vec<OsString> = vec![
-                    "/W3".into(),
-                    "/Zi".into(),
-                    "/EHsc".into(),
-                    "/c".into(),
-                ];
-                if config.cxx_options.rtti {
-                    flags.push("/GR".into());
-                } else {
-                    flags.push("/GR-".into());
-                }
-                if config.cxx_options.async_await {
-                    flags.push("/await".into());
-                }
-                match config.cxx_options.standard {
-                    CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".into()),
-                    CxxStandard::Cxx17 => flags.push("/std:c++17".into()),
-                    CxxStandard::Cxx20 => flags.push("/std:c++latest".into()),
-                }
-                match build_options.compile_mode {
-                    CompileMode::Debug => {
-                        flags.push("/MDd".into());
-                        flags.push("/RTC1".into());
-                    },
-                    CompileMode::Release => {
-                        flags.push("/O2".into());
-                    },
-                }
-                for definition in definitions {
-                    flags.push(format!("/D{}={}", definition[0].as_ref(), definition[1].as_ref()).into());
-                }
-                for path in &toolchain_paths.include_paths {
-                    flags.push("/I".into());
-                    flags.push(path.as_os_str().to_owned());
-                }
-                flags
-            },
-        };
-        let (linker_flags, linker_lib_dependencies) = match host.os() {
-            Os::Windows => {
-                let mut flags: Vec<OsString> = vec![
-                    "/nologo".into(),
-                    "/debug".into(),
-                ];
-                flags.push(
-                    match config.output_type {
-                        OutputType::GuiApp => "/SUBSYSTEM:WINDOWS",
-                        OutputType::ConsoleApp => "/SUBSYSTEM:CONSOLE",
-                        OutputType::DynamicLibrary => "/DLL",
-                    }.into()
-                );
-                flags.push("/manifest:embed".into());
-                if has_manifest {
-                    let mut flag = OsString::from("/manifestinput:");
-                    flag.push(&manifest_path);
-                    flags.push(flag);
-                    flags.push("/manifestuac:no".into());
-                } else {
-                    match config.output_type {
-                        OutputType::GuiApp => {
-                            flags.push("/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0'
-                            processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'".into());
-                        }
-                        OutputType::ConsoleApp | OutputType::DynamicLibrary => {},
-                    }
-                }
                 let mut dependencies = DependencyBuilder::default();
                 // TODO: Speed!!!
                 for lib in &config.link_libraries {
@@ -268,10 +201,7 @@ impl<'a> BuildEnvironment<'a> {
                         }
                     }
                 }
-                for path in &toolchain_paths.lib_paths {
-                    flags.push(cmd_flag("/LIBPATH:", path));
-                }
-                (flags, dependencies.build())
+                dependencies.build()
             }
         };
         let artifact_path = artifact_path.into();
@@ -281,9 +211,6 @@ impl<'a> BuildEnvironment<'a> {
         fs::create_dir_all(&src_deps_path)?;
 
         Ok(BuildEnvironment {
-            compiler_flags,
-            linker_flags,
-
             config_path,
             manifest_path: if has_manifest {
                 Some(manifest_path)
@@ -295,6 +222,8 @@ impl<'a> BuildEnvironment<'a> {
 
             toolchain_paths,
             config,
+            build_options,
+            definitions,
             artifact_path,
             src_dir_path: "src".into(),
             assets_dir_path: "assets".into(),
@@ -545,8 +474,49 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
-        let mut args = self.compiler_flags.clone();
         let path = path.as_ref();
+
+        let host = Platform::host();
+        let mut args = match host.os() {
+            Os::Windows => {
+                let mut flags: Vec<OsString> = vec![
+                    "/W3".into(),
+                    "/Zi".into(),
+                    "/EHsc".into(),
+                    "/c".into(),
+                ];
+                if self.config.cxx_options.rtti {
+                    flags.push("/GR".into());
+                } else {
+                    flags.push("/GR-".into());
+                }
+                if self.config.cxx_options.async_await {
+                    flags.push("/await".into());
+                }
+                match self.config.cxx_options.standard {
+                    CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".into()),
+                    CxxStandard::Cxx17 => flags.push("/std:c++17".into()),
+                    CxxStandard::Cxx20 => flags.push("/std:c++latest".into()),
+                }
+                match self.build_options.compile_mode {
+                    CompileMode::Debug => {
+                        flags.push("/MDd".into());
+                        flags.push("/RTC1".into());
+                    },
+                    CompileMode::Release => {
+                        flags.push("/O2".into());
+                    },
+                }
+                for (name, val) in self.definitions {
+                    flags.push(format!("/D{}={}", name, val).into());
+                }
+                for path in &self.toolchain_paths.include_paths {
+                    flags.push("/I".into());
+                    flags.push(path.as_os_str().to_owned());
+                }
+                flags
+            },
+        };
 
         println!("Compiling {}", path.as_os_str().to_string_lossy());
         match pch {
@@ -594,7 +564,41 @@ impl<'a> BuildEnvironment<'a> {
         obj_paths: impl IntoIterator<Item=impl AsRef<Path>> + Clone,
     ) -> Result<(), BuildError> {
         println!("Linking {}...", output_path.as_ref().to_string_lossy());
-        let mut args = self.linker_flags.clone();
+        let host = Platform::host();
+        let mut args = match host.os() {
+            Os::Windows => {
+                let mut flags: Vec<OsString> = vec![
+                    "/nologo".into(),
+                    "/debug".into(),
+                ];
+                flags.push(
+                    match self.config.output_type {
+                        OutputType::GuiApp => "/SUBSYSTEM:WINDOWS",
+                        OutputType::ConsoleApp => "/SUBSYSTEM:CONSOLE",
+                        OutputType::DynamicLibrary => "/DLL",
+                    }.into()
+                );
+                flags.push("/manifest:embed".into());
+                if let Some(manifest_path) = &self.manifest_path {
+                    let mut flag = OsString::from("/manifestinput:");
+                    flag.push(manifest_path);
+                    flags.push(flag);
+                    flags.push("/manifestuac:no".into());
+                } else {
+                    match self.config.output_type {
+                        OutputType::GuiApp => {
+                            flags.push("/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0'
+                            processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'".into());
+                        }
+                        OutputType::ConsoleApp | OutputType::DynamicLibrary => {},
+                    }
+                }
+                for path in &self.toolchain_paths.lib_paths {
+                    flags.push(cmd_flag("/LIBPATH:", path));
+                }
+                flags
+            }
+        };
         args.push(
             cmd_flag(
                 "/out:",
