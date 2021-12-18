@@ -202,13 +202,13 @@ void print_hello_world() {{
             let config: ProjectConfig = serde_json::from_reader(config_file)
                 .unwrap_or_else(|error| fail_immediate!("Failed to parse project file: {}", error));
 
-            if matches!(config.output_type, OutputType::DynamicLibrary) && matches!(options.sub_command, Subcommand::Run(_) | Subcommand::Debug(_)) {
+            if matches!(config.output_type, OutputType::DynamicLibrary | OutputType::StaticLibrary) && matches!(options.sub_command, Subcommand::Run(_) | Subcommand::Debug(_)) {
                 let sub_command_name = match options.sub_command {
                     Subcommand::Run(_) => "run",
                     Subcommand::Debug(_) => "debug",
                     _ => unreachable!(),
                 };
-                fail_immediate!("`{}` subcommand not supported for dynamic library projects. Consider using the `build` subcommand and linking the result in another executable.", sub_command_name);
+                fail_immediate!("`{}` subcommand not supported for library projects. Consider using the `build` subcommand and linking the result in another executable.", sub_command_name);
             }
 
             // Validate supported targets list
