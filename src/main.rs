@@ -6,6 +6,7 @@ use std::io::{BufReader, Write};
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::collections::HashSet;
+use std::collections::HashMap;
 
 use clap::Parser;
 
@@ -36,15 +37,7 @@ fn main() {
     let options = CmdOptions::parse();
     macro_rules! _task_failed {
         () => {
-            println!(
-                "\n{} failed.",
-                match options.sub_command {
-                    Subcommand::Init { .. } => "Initialization",
-                    Subcommand::Build(_) | Subcommand::Run(_) | Subcommand::Debug(_) => "Build",
-                    Subcommand::Clean => "Clean",
-                    Subcommand::Kill => "Kill",
-                },
-            );
+            println!("\nABS process failed.");
             std::process::exit(1);
         }
     }
@@ -79,6 +72,7 @@ fn main() {
                     output_type: *output_type,
                     link_libraries,
                     supported_targets: vec![Platform::Win32, Platform::Win64],
+                    dependencies: vec![],
                 };
                 let project_file = File::create(&config_path)
                     .unwrap_or_else(|error| fail_immediate!("Unable to open project file for writing: {}.", error));
@@ -194,13 +188,28 @@ void print_hello_world() {{
             }
         },
         Subcommand::Build(build_options) | Subcommand::Run(build_options) | Subcommand::Debug(build_options) => {
-            let config_path = PathBuf::from("abs.json");
-            let config_file = match File::open(&config_path) {
-                Ok(file) => BufReader::new(file),
-                Err(error) => fail_immediate!("Unable to read project file in current working directory: {}.", error),
-            };
-            let config: ProjectConfig = serde_json::from_reader(config_file)
-                .unwrap_or_else(|error| fail_immediate!("Failed to parse project file: {}", error));
+            fn load_config(root_path: &Path) -> (PathBuf, ProjectConfig) {
+                let config_path = root_path.join("abs.json");
+                let config_file = match File::open(&config_path) {
+                    Ok(file) => BufReader::new(file),
+                    Err(error) => fail_immediate!("Unable to read project file in directory \"{}\": {}.", root_path.as_os_str().to_string_lossy(), error),
+                };
+                let config: ProjectConfig = serde_json::from_reader(config_file)
+                    .unwrap_or_else(|error| fail_immediate!("Failed to parse project file: {}", error));
+
+                // Validate supported targets list
+                if config.supported_targets.is_empty() {
+                    fail_immediate!("{} contains an empty list of supported targets. Please add at least one and try again.\nAvailable options: win32, win64.", config_path.as_os_str().to_string_lossy());
+                }
+                // TODO: speed
+                let unique_supported_targets: HashSet<_> = config.supported_targets.iter().cloned().collect();
+                if unique_supported_targets.len() < config.supported_targets.len() {
+                    fail_immediate!("{} contains one or more duplicates in its list of supported targets. Please ensure that each target is unique.\nThe supported platforms listed are: {:?}", config_path.as_os_str().to_string_lossy(), config.supported_targets);
+                }
+
+                (config_path, config)
+            }
+            let (config_path, config) = load_config(Path::new("."));
 
             if matches!(config.output_type, OutputType::DynamicLibrary | OutputType::StaticLibrary) && matches!(options.sub_command, Subcommand::Run(_) | Subcommand::Debug(_)) {
                 let sub_command_name = match options.sub_command {
@@ -211,15 +220,99 @@ void print_hello_world() {{
                 fail_immediate!("`{}` subcommand not supported for library projects. Consider using the `build` subcommand and linking the result in another executable.", sub_command_name);
             }
 
-            // Validate supported targets list
-            if config.supported_targets.is_empty() {
-                fail_immediate!("abs.json contains an empty list of supported targets. Please add at least one and try again.\nAvailable options: win32, win64.");
+            struct Project {
+                config_path: PathBuf,
+                config: ProjectConfig,
+                ref_count: u32,
+                dep_names: Vec<String>,
+                visited: bool,
             }
-            // TODO: speed
-            let unique_supported_targets: HashSet<_> = config.supported_targets.iter().cloned().collect();
-            if unique_supported_targets.len() < config.supported_targets.len() {
-                fail_immediate!("abs.json contains one or more duplicates in its list of supported targets. Please ensure that each target is unique.\nThe supported platforms listed are: {:?}", config.supported_targets);
+
+            let mut projects = HashMap::<String, Project>::new();
+            let config_path = match config_path.canonicalize() {
+                Ok(canon) => canon,
+                Err(_) => fail_immediate!("Failed to get canonical path for project config file"),
+            };
+            projects.insert(config.name.clone(), Project { config_path: config_path.clone(), config: config.clone(), ref_count: 1, dep_names: Vec::new(), visited: false });
+
+            fn accumulate_dependencies(projects: &mut HashMap<String, Project>, config_path: PathBuf, config: &ProjectConfig) {
+                let mut root_path = config_path.clone();
+                root_path.pop();
+
+                let canonical_deps: Vec<PathBuf> = config.dependencies.iter()
+                    .map(|dep| {
+                        let dep = if dep.is_relative() {
+                            root_path.join(dep)
+                        } else {
+                            dep.clone()
+                        };
+                        match dep.canonicalize() {
+                            Ok(canon) => canon,
+                            Err(error) => fail_immediate!("Failed to get canonical path for dependency \"{}\": {}", dep.as_os_str().to_string_lossy(), error),
+                        }
+                    }).collect();
+                let unique_deps: HashSet<&PathBuf> = canonical_deps.iter().collect();
+                if unique_deps.len() < canonical_deps.len() {
+                    fail_immediate!("{} contains one or more duplicates in its dependencies array", config_path.as_os_str().to_string_lossy());
+                }
+                let mut dep_names = Vec::new();
+                for dependency in &canonical_deps {
+                    let (dep_config_path, dep_config) = load_config(dependency);
+                    let proj = projects
+                        .entry(dep_config.name.clone())
+                        .or_insert_with(|| {
+                            Project {
+                                config_path: dep_config_path.clone(),
+                                config: dep_config.clone(),
+                                ref_count: 0,
+                                dep_names: Vec::new(),
+                                visited: false,
+                            }
+                        });
+                    proj.ref_count += 1;
+                    // TODO: This is a massive hack! Should think of a more principled way of finding loops.
+                    if proj.ref_count > 100 {
+                        fail_immediate!("Loop found in dependency graph.");
+                    }
+                    if dep_config_path != proj.config_path {
+                        fail_immediate!("Two projects in dependency graph found with the same name, \"{}\"", proj.config.name);
+                    }
+                    dep_names.push(proj.config.name.clone());
+
+                    accumulate_dependencies(projects, dep_config_path, &dep_config);
+                }
+
+                projects.get_mut(&config.name).unwrap().dep_names = dep_names;
             }
+            accumulate_dependencies(&mut projects, config_path.clone(), &config);
+
+            let mut link_libraries = HashSet::<String>::new();
+            let cxx_options = config.cxx_options;
+            fn validate_dependencies(projects: &mut HashMap<String, Project>, link_libraries: &mut HashSet<String>, name: &str, root_cxx_options: CxxOptions, root_name: &str) {
+                let proj = projects.get(name).unwrap();
+                let supported_targets = proj.config.supported_targets.clone();
+                if proj.visited {
+                    return;
+                }
+
+                for dep in proj.dep_names.clone() {
+                    validate_dependencies(projects, link_libraries, &dep, root_cxx_options, root_name);
+                    let dep = projects.get(&dep).unwrap();
+                    link_libraries.extend(dep.config.link_libraries.iter().cloned());
+                    if !dep.config.cxx_options.is_compatible_with(&root_cxx_options) {
+                        fail_immediate!("{}'s C++ options are incompatible with those of the root project \"{}\".", dep.config.name, name);
+                    }
+                    for platform in &supported_targets {
+                        if !dep.config.supported_targets.contains(platform) {
+                            fail_immediate!("{} claims to support target {:?}, but its dependency {} does not.", name, platform, dep.config.name);
+                        }
+                    }
+                }
+
+                let proj = projects.get_mut(name).unwrap();
+                proj.visited = true;
+            }
+            validate_dependencies(&mut projects, &mut link_libraries, &config.name, cxx_options, &config.name);
 
             fn build(target: Platform, build_options: &BuildOptions, config: &ProjectConfig, config_path: &Path) -> (PathBuf, ToolchainPaths) {
                 let mode = match build_options.compile_mode {
@@ -230,7 +323,7 @@ void print_hello_world() {{
 
                 let toolchain_paths = ToolchainPaths::find(target).unwrap();            
                 // Create abs/debug or abs/release, if it doesn't exist already
-                let mut artifact_path: PathBuf = ["abs", mode].iter().collect();
+                let mut artifact_path: PathBuf = ["abs", mode, &config.name].iter().collect();
                 artifact_path.push(format!("{:?}", target));
     
                 let mut env = BuildEnvironment::new(
