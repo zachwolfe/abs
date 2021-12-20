@@ -367,13 +367,16 @@ void print_hello_world() {{
                     println!("Build succeeded.");
                     (artifact_path, toolchain_paths)
                 }
+                let mut link_libraries = Vec::from(link_libraries);
                 for project in dependencies {
-                    project.config.adapt_to_workspace(&root_project.config, link_libraries);
-                    build(target, build_options, &project.config, &project.config_path);
+                    project.config.adapt_to_workspace(&root_project.config);
+                    let (mut artifact_path, _) = build(target, build_options, &project.config, &project.config_path);
+                    artifact_path.push(format!("{}.lib", project.config.name));
+                    link_libraries.push(artifact_path.as_os_str().to_string_lossy().into());
                     // Add spacing between projects
                     println!();
                 }
-                root_project.config.link_libraries = Vec::from(link_libraries);
+                root_project.config.link_libraries = link_libraries;
                 build(target, build_options, &root_project.config, &root_project.config_path)
             }
             let mut root_project = projects.remove(&config.name).unwrap();

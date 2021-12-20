@@ -13,9 +13,8 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
-    pub fn adapt_to_workspace(&mut self, root_config: &ProjectConfig, link_libraries: &[String]) {
+    pub fn adapt_to_workspace(&mut self, root_config: &ProjectConfig) {
         self.cxx_options = root_config.cxx_options;
-        self.link_libraries = link_libraries.into();
     }
 }
 
