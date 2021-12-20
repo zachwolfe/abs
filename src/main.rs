@@ -323,6 +323,16 @@ void print_hello_world() {{
                 for dep in proj.dep_names.clone() {
                     validate_dependencies(projects, link_libraries, &dep, root_cxx_options, root_name);
                     let dep = projects.get(&dep).unwrap();
+                    if !matches!(dep.config.output_type, OutputType::StaticLibrary) {
+                        let dep_type = match dep.config.output_type {
+                            OutputType::GuiApp => "GUI app",
+                            OutputType::ConsoleApp => "console app",
+                            OutputType::DynamicLibrary => "dynamic library",
+                            OutputType::StaticLibrary => panic!(),
+                        };
+                        let proj = projects.get(name).unwrap();
+                        fail_immediate!("Project \"{}\" depends on \"{}\", a {}. Only static library dependencies are supported at this time.", proj.config.name, dep.config.name, dep_type);
+                    }
                     link_libraries.extend(dep.config.link_libraries.iter().cloned());
                     if !dep.config.cxx_options.is_compatible_with(&root_cxx_options) {
                         fail_immediate!("{}'s C++ options are incompatible with those of the root project \"{}\".", dep.config.name, name);
