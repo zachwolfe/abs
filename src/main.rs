@@ -321,7 +321,6 @@ void print_hello_world() {{
                         let proj = projects.get(name).unwrap();
                         fail_immediate!("Project \"{}\" depends on \"{}\", a {}. Only static library dependencies are supported at this time.", proj.config.name, dep.config.name, dep_type);
                     }
-                    link_libraries.extend(dep.config.link_libraries.iter().cloned());
                     if !dep.config.cxx_options.is_compatible_with(&root_cxx_options) {
                         fail_immediate!("{}'s C++ options are incompatible with those of the root project \"{}\".", dep.config.name, name);
                     }
@@ -331,8 +330,9 @@ void print_hello_world() {{
                         }
                     }
                 }
-
+                
                 let proj = projects.get_mut(name).unwrap();
+                link_libraries.extend(proj.config.link_libraries.iter().cloned());
                 proj.visited = true;
             }
             validate_dependencies(&mut projects, &mut link_libraries, &config.name, cxx_options, &config.name);
