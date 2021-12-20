@@ -1,8 +1,8 @@
 use std::process::Command;
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, Component};
 use std::fs::{self, File};
 use std::io::ErrorKind as IoErrorKind;
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Write, Result as IoResult};
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::collections::HashSet;
@@ -30,30 +30,18 @@ fn kill_debugger() -> Option<i32> {
     kill_process("devenv.exe")
 }
 
-// This function exists because variations on the following pseudocode return unexpected (by me) results:
-// Path::new("C:\some\canonical\path").join("..")
-//       expected: "C:\some\canonical"
-//       actual:   "C:\some\canonical\.."
-fn smart_join(root: impl AsRef<Path>, relative: impl AsRef<Path>) -> PathBuf {
-    let root = root.as_ref();
-    let relative = relative.as_ref();
-    if relative.is_absolute() {
-        return relative.to_path_buf()
+// Path::canonicalize() adds an unwanted verbatim prefix on windows. This removes it.
+fn canonicalize(p: impl AsRef<Path>) -> IoResult<PathBuf> {
+    let p = p.as_ref().canonicalize()?;
+    let mut components = p.components();
+    match components.next() {
+        Some(Component::Prefix(_)) => {
+            let mut ret_val = PathBuf::new();
+            ret_val.extend(components);
+            Ok(ret_val)
+        },
+        _ => Ok(p.to_path_buf()),
     }
-
-    let mut ret_val = root.to_path_buf();
-    for component in relative.components() {
-        let component = component.as_os_str();
-        if component == OsStr::new("..") {
-            ret_val.pop();
-        } else if component == OsStr::new(".") {
-            continue;
-        } else {
-            ret_val.push(component);
-        }
-    }
-
-    ret_val
 }
 
 #[cfg(target_os = "windows")]
@@ -255,7 +243,7 @@ void print_hello_world() {{
             }
 
             let mut projects = HashMap::<String, Project>::new();
-            let config_path = match config_path.canonicalize() {
+            let config_path = match canonicalize(config_path) {
                 Ok(canon) => canon,
                 Err(_) => fail_immediate!("Failed to get canonical path for project config file"),
             };
@@ -270,8 +258,8 @@ void print_hello_world() {{
                         if dep.components().count() == 0 {
                             fail_immediate!("Empty path found as dependency in project \"{}\"", config.name);
                         }
-                        let dep = smart_join(&root_path, dep);
-                        match dep.canonicalize() {
+                        let dep = root_path.join(dep);
+                        match canonicalize(&dep) {
                             Ok(canon) => canon,
                             Err(error) => fail_immediate!("Failed to get canonical path for dependency \"{}\": {}", dep.as_os_str().to_string_lossy(), error),
                         }
@@ -349,35 +337,48 @@ void print_hello_world() {{
             }
             validate_dependencies(&mut projects, &mut link_libraries, &config.name, cxx_options, &config.name);
 
-            fn build(target: Platform, build_options: &BuildOptions, config: &ProjectConfig, config_path: &Path) -> (PathBuf, ToolchainPaths) {
-                let mode = match build_options.compile_mode {
-                    CompileMode::Debug => "debug",
-                    CompileMode::Release => "release",
-                };
-                println!("Building {} for target {:?} in {} mode", config.name, target, mode);
-
-                let toolchain_paths = ToolchainPaths::find(target).unwrap();            
-                // Create abs/debug or abs/release, if it doesn't exist already
-                let mut artifact_path: PathBuf = ["abs", mode, &config.name].iter().collect();
-                artifact_path.push(format!("{:?}", target));
+            fn build_all<'a>(target: Platform, build_options: &BuildOptions, dependencies: impl IntoIterator<Item=&'a mut Project>, root_project: &mut Project, link_libraries: &[String]) -> (PathBuf, ToolchainPaths) {
+                fn build(target: Platform, build_options: &BuildOptions, config: &ProjectConfig, config_path: &Path) -> (PathBuf, ToolchainPaths) {
+                    let mode = match build_options.compile_mode {
+                        CompileMode::Debug => "debug",
+                        CompileMode::Release => "release",
+                    };
+                    println!("Building \"{}\" for target {:?} in {} mode\n", config.name, target, mode);
     
-                let mut env = BuildEnvironment::new(
-                    config,
-                    config_path,
-                    build_options,
-                    &toolchain_paths,
-                    // TODO: make these configurable
-                    &[("_WINDOWS", ""), ("WIN32", ""), ("UNICODE", ""), ("_USE_MATH_DEFINES", "")],
-                    &artifact_path,
-                ).unwrap();
+                    let toolchain_paths = ToolchainPaths::find(target).unwrap();            
+                    // Create abs/debug or abs/release, if it doesn't exist already
+                    let mut artifact_path: PathBuf = ["abs", mode, &config.name].iter().collect();
+                    artifact_path.push(format!("{:?}", target));
+        
+                    let mut env = BuildEnvironment::new(
+                        config,
+                        config_path,
+                        build_options,
+                        &toolchain_paths,
+                        // TODO: make these configurable
+                        &[("_WINDOWS", ""), ("WIN32", ""), ("UNICODE", ""), ("_USE_MATH_DEFINES", "")],
+                        &artifact_path,
+                    ).unwrap();
+        
+                    if let Some(error) = env.build().err() {
+                        env.fail(error);
+                    }
     
-                if let Some(error) = env.build().err() {
-                    env.fail(error);
+                    println!("Build succeeded.");
+                    (artifact_path, toolchain_paths)
                 }
-
-                println!("Build succeeded.");
-                (artifact_path, toolchain_paths)
+                for project in dependencies {
+                    project.config.adapt_to_workspace(&root_project.config, link_libraries);
+                    build(target, build_options, &project.config, &project.config_path);
+                    // Add spacing between projects
+                    println!();
+                }
+                root_project.config.link_libraries = Vec::from(link_libraries);
+                build(target, build_options, &root_project.config, &root_project.config_path)
             }
+            let mut root_project = projects.remove(&config.name).unwrap();
+            let mut dependencies: Vec<Project> = projects.into_iter().map(|(_, val)| val).collect();
+            let link_libraries: Vec<String> = link_libraries.into_iter().collect();
 
             let host = Platform::host();
             let specified_target: Target = build_options.target.into();
@@ -392,7 +393,7 @@ void print_hello_world() {{
                         fail_immediate!("Target `all` is not valid for `{}` subcommand. Please use the `build` subcommand instead.", sub_command_name);
                     } else {
                         for &supported_target in &config.supported_targets {
-                            build(supported_target, build_options, &config, &config_path);
+                            build_all(supported_target, build_options, &mut dependencies, &mut root_project, &link_libraries);
                         }
                         return;
                     }
@@ -430,7 +431,7 @@ void print_hello_world() {{
                             }
                         }
                     }
-                    let (artifact_path, toolchain_paths) = build(target, build_options, &config, &config_path);
+                    let (artifact_path, toolchain_paths) = build_all(target, build_options, &mut dependencies, &mut root_project, &link_libraries);
                     (config, artifact_path, toolchain_paths)
                 },
                 Target::Platform(target) => {
@@ -447,7 +448,7 @@ void print_hello_world() {{
                         fail_immediate!("`{}` subcommand cannot proceed because your host platform, {:?}, is not compatible with the supplied target {:?}. Please use the `build` subcommand instead.", sub_command_name, host, target);
                     }
 
-                    let (artifact_path, toolchain_paths) = build(target, build_options, &config, &config_path);
+                    let (artifact_path, toolchain_paths) = build_all(target, build_options, &mut dependencies, &mut root_project, &link_libraries);
                     (config, artifact_path, toolchain_paths)
                 }
             }

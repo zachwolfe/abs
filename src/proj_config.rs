@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use std::cmp::{PartialOrd, Ord, Ordering};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ProjectConfig {
     pub name: String,
     pub cxx_options: CxxOptions,
@@ -12,7 +12,14 @@ pub struct ProjectConfig {
     pub dependencies: Vec<PathBuf>,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+impl ProjectConfig {
+    pub fn adapt_to_workspace(&mut self, root_config: &ProjectConfig, link_libraries: &[String]) {
+        self.cxx_options = root_config.cxx_options;
+        self.link_libraries = link_libraries.into();
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
 pub struct CxxOptions {
     pub rtti: bool,
     pub async_await: bool,
@@ -35,7 +42,7 @@ impl Default for CxxOptions {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum CxxStandard {
     #[serde(rename="c++11")]
     Cxx11,
@@ -76,7 +83,7 @@ impl Default for CxxStandard {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
 #[serde(rename_all="snake_case")]
 pub enum OutputType {
     GuiApp,

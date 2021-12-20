@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use super::proj_config::{Platform, Os, Arch, ProjectConfig, CxxStandard, OutputType};
 use super::cmd_options::{BuildOptions, CompileMode};
+use super::canonicalize;
 
 pub struct ToolchainPaths {
     pub debugger_path: PathBuf,
@@ -210,6 +211,9 @@ impl<'a> BuildEnvironment<'a> {
         fs::create_dir_all(&objs_path)?;
         fs::create_dir_all(&src_deps_path)?;
 
+        let src_dir_path = project_path.join("src");
+        let assets_dir_path = project_path.join("assets");
+
         Ok(BuildEnvironment {
             config_path,
             manifest_path: if has_manifest {
@@ -225,8 +229,8 @@ impl<'a> BuildEnvironment<'a> {
             build_options,
             definitions,
             artifact_path,
-            src_dir_path: "src".into(),
-            assets_dir_path: "assets".into(),
+            src_dir_path,
+            assets_dir_path,
             objs_path,
             src_deps_path,
 
@@ -386,7 +390,7 @@ impl<'a> BuildEnvironment<'a> {
         if self.assets_dir_path.exists() && fs::metadata(&self.assets_dir_path)?.is_dir() {
             if matches!(self.config.output_type, OutputType::StaticLibrary) {
                 println!("Warning: {} has an assets directory, which is unsupported in static library projects. It will be ignored.", self.config.name);
-                if let Ok(canon) = self.assets_dir_path.canonicalize() {
+                if let Ok(canon) = canonicalize(&self.assets_dir_path) {
                     println!("    assets directory found at path: \"{}\"\n", canon.as_os_str().to_string_lossy());
                 }
             }
