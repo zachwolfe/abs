@@ -30,6 +30,32 @@ fn kill_debugger() -> Option<i32> {
     kill_process("devenv.exe")
 }
 
+// This function exists because variations on the following pseudocode return unexpected (by me) results:
+// Path::new("C:\some\canonical\path").join("..")
+//       expected: "C:\some\canonical"
+//       actual:   "C:\some\canonical\.."
+fn smart_join(root: impl AsRef<Path>, relative: impl AsRef<Path>) -> PathBuf {
+    let root = root.as_ref();
+    let relative = relative.as_ref();
+    if relative.is_absolute() {
+        return relative.to_path_buf()
+    }
+
+    let mut ret_val = root.to_path_buf();
+    for component in relative.components() {
+        let component = component.as_os_str();
+        if component == OsStr::new("..") {
+            ret_val.pop();
+        } else if component == OsStr::new(".") {
+            continue;
+        } else {
+            ret_val.push(component);
+        }
+    }
+
+    ret_val
+}
+
 #[cfg(target_os = "windows")]
 fn main() {
     use crate::cmd_options::Target;
@@ -241,11 +267,10 @@ void print_hello_world() {{
 
                 let canonical_deps: Vec<PathBuf> = config.dependencies.iter()
                     .map(|dep| {
-                        let dep = if dep.is_relative() {
-                            root_path.join(dep)
-                        } else {
-                            dep.clone()
-                        };
+                        if dep.components().count() == 0 {
+                            fail_immediate!("Empty path found as dependency in project \"{}\"", config.name);
+                        }
+                        let dep = smart_join(&root_path, dep);
                         match dep.canonicalize() {
                             Ok(canon) => canon,
                             Err(error) => fail_immediate!("Failed to get canonical path for dependency \"{}\": {}", dep.as_os_str().to_string_lossy(), error),
