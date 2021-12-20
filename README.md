@@ -1,9 +1,9 @@
 # ABS: A Build System
 A dead simple build system for C++ that values convention over configuration. Created due to my distaste for other build systems. This project is in its infancy; feel free to file issues.
 
-## Current Status & Future Plans (as of November 13, 2021)
+## Current Status & Future Plans (as of December 19, 2021)
 - Only supports Windows for now; support for Apple platforms and Linux is planned, but not right away
-- Supports building GUI apps, console apps and dynamic libraries
+- Supports building GUI apps, console apps, dynamic libraries and static libraries
   - Both 32-bit and 64-bit
 - Limitations:
   - My code for finding the local Visual Studio installation is not very robust
@@ -37,7 +37,8 @@ A dead simple build system for C++ that values convention over configuration. Cr
   },
   "output_type": "gui_app",
   "link_libraries": ["user32.lib"],
-  "supported_targets": ["win32", "win64"]
+  "supported_targets": ["win32", "win64"],
+  "dependencies": []
 }
 ```
 - Navigate to the project directory (if necessary)
