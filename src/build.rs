@@ -508,7 +508,10 @@ impl<'a> BuildEnvironment<'a> {
                 match self.config.cxx_options.standard {
                     CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".into()),
                     CxxStandard::Cxx17 => flags.push("/std:c++17".into()),
-                    CxxStandard::Cxx20 => flags.push("/std:c++latest".into()),
+                    CxxStandard::Cxx20 => {
+                        flags.push("/std:c++latest".into());
+                        // flags.push("/Zc:preprocessor".into());
+                    }
                 }
                 match self.build_options.compile_mode {
                     CompileMode::Debug => {
@@ -526,6 +529,8 @@ impl<'a> BuildEnvironment<'a> {
                     flags.push("/I".into());
                     flags.push(path.as_os_str().to_owned());
                 }
+                flags.push("/I".into());
+                flags.push(self.src_dir_path.as_os_str().to_owned());
                 flags
             },
         };
@@ -558,6 +563,8 @@ impl<'a> BuildEnvironment<'a> {
             )
         );
         let src_deps_json_path = self.get_artifact_path(&path, &self.src_deps_path, "json");
+        let src_deps_parent = src_deps_json_path.parent().unwrap();
+        fs::create_dir_all(src_deps_parent)?;
         args.push(
             cmd_flag(
                 "/sourceDependencies",
