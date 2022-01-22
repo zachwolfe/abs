@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::array::IntoIter;
 use std::time::SystemTime;
 use std::iter::once;
+use std::sync::mpsc;
 
 use serde::Deserialize;
 
@@ -451,20 +452,39 @@ impl<'a> BuildEnvironment<'a> {
         self.assemble_sources_to_rebuild(paths, obj_paths, pch, &mut jobs)?;
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
 
-        rayon::scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+
+        // TODO: this could probably have been achieved more efficiently with a parallel iterator
+        rayon::scope(move |scope| {
+            let num_jobs = jobs.len();
             for job in jobs {
+                let sender = sender.clone();
                 let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
                 let mut obj_subdir_path = obj_path;
                 obj_subdir_path.pop();
                 fs::create_dir_all(&obj_subdir_path).unwrap();
                 let objs_path = self.objs_path.clone();
-                scope.spawn(|_| {
-                    self.compile(job, objs_path, pch_option).unwrap();
+                let salf = &*self;
+                scope.spawn(move |_| {
+                    let res = salf.compile(job, objs_path, pch_option);
+                    sender.send(res).unwrap();
                 });
             }
-        });
-
-        Ok(())
+            let mut res = Ok(());
+            let mut succ = 0;
+            let mut fail = 0;
+            for _ in 0..num_jobs {
+                match receiver.recv().unwrap() {
+                    Ok(()) => succ += 1,
+                    Err(err) => {
+                        res = Err(err);
+                        fail += 1;
+                    }
+                }
+            }
+            println!("Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
+            res
+        })
     }
 
     fn discover_src_deps(&mut self, path: impl AsRef<Path>) -> Result<Option<Vec<PathBuf>>, BuildError> {
