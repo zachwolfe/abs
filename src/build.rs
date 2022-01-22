@@ -482,7 +482,9 @@ impl<'a> BuildEnvironment<'a> {
                     }
                 }
             }
-            println!("Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
+            if fail > 0 {
+                println!("Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
+            }
             res
         })
     }
