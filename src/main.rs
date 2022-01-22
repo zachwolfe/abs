@@ -43,7 +43,6 @@ fn canonicalize(p: impl AsRef<Path>) -> IoResult<PathBuf> {
             };
             
             ret_val.extend(components);
-            dbg!(&ret_val);
             Ok(ret_val)
         },
         _ => Ok(p.to_path_buf()),

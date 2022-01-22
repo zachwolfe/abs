@@ -353,7 +353,7 @@ impl<'a> BuildEnvironment<'a> {
             }
         };
         let mut obj_paths = Vec::new();
-        self.compile_directory(&paths, &mut obj_paths, pch)?;
+        self.compile_sources(&paths, &mut obj_paths, pch)?;
 
         let extension = match self.config.output_type {
             OutputType::ConsoleApp | OutputType::GuiApp => "exe",
@@ -412,14 +412,8 @@ impl<'a> BuildEnvironment<'a> {
         path
     }
 
-    pub fn compile_directory<'b>(
-        &mut self,
-        paths: &'b SrcPaths,
-        obj_paths: &mut Vec<PathBuf>,
-        pch: bool,
-    ) -> Result<(), BuildError> {
+    pub fn assemble_sources_to_rebuild<'b>(&mut self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, pch: bool, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
-        let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
             obj_paths.push(obj_path.clone());
@@ -434,17 +428,41 @@ impl<'a> BuildEnvironment<'a> {
                 true
             };
 
+            
             if should_rebuild {
-                let mut obj_subdir_path = obj_path;
-                obj_subdir_path.pop();
-                fs::create_dir_all(&obj_subdir_path).unwrap();
-                self.compile(path, &self.objs_path, pch_option)?;
+                sources.push(path.clone());
             }
         }
 
         for child in &paths.children {
-            self.compile_directory(child, obj_paths, pch)?;
+            self.assemble_sources_to_rebuild(child, obj_paths, pch, sources)?;
         }
+
+        Ok(())
+    }
+
+    pub fn compile_sources<'b>(
+        &mut self,
+        paths: &'b SrcPaths,
+        obj_paths: &mut Vec<PathBuf>,
+        pch: bool,
+    ) -> Result<(), BuildError> {
+        let mut jobs = Vec::new();
+        self.assemble_sources_to_rebuild(paths, obj_paths, pch, &mut jobs)?;
+        let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
+
+        rayon::scope(|scope| {
+            for job in jobs {
+                let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
+                let mut obj_subdir_path = obj_path;
+                obj_subdir_path.pop();
+                fs::create_dir_all(&obj_subdir_path).unwrap();
+                let objs_path = self.objs_path.clone();
+                scope.spawn(|_| {
+                    self.compile(job, objs_path, pch_option).unwrap();
+                });
+            }
+        });
 
         Ok(())
     }
@@ -496,6 +514,7 @@ impl<'a> BuildEnvironment<'a> {
                     "/Zi".into(),
                     "/EHsc".into(),
                     "/c".into(),
+                    "/FS".into(),
                 ];
                 if self.config.cxx_options.rtti {
                     flags.push("/GR".into());
