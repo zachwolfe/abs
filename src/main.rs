@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::collections::HashSet;
 use std::collections::HashMap;
+use std::io::Cursor;
 
 use clap::Parser;
 
@@ -211,7 +212,17 @@ void print_hello_world() {{
                 let config_path = root_path.join("abs.json");
                 let config_file = match File::open(&config_path) {
                     Ok(file) => BufReader::new(file),
-                    Err(error) => fail_immediate!("Unable to read project file in directory \"{}\": {}.", root_path.as_os_str().to_string_lossy(), error),
+                    Err(error) => {
+                        let mut err_msg = Cursor::new(Vec::new());
+                        let root_path_str = root_path.as_os_str().to_string_lossy();
+                        write!(err_msg, "Unable to read project file in ").unwrap();
+                        if root_path_str == "." {
+                            write!(err_msg, "the current directory").unwrap();
+                        } else {
+                            write!(err_msg, "directory \"{}\"", root_path_str).unwrap();
+                        }
+                        fail_immediate!("{}: {}.", String::from_utf8_lossy(&err_msg.into_inner()), error);
+                    },
                 };
                 let config: ProjectConfig = serde_json::from_reader(config_file)
                     .unwrap_or_else(|error| fail_immediate!("Failed to parse project file: {}", error));
