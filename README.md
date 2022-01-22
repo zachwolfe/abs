@@ -1,15 +1,15 @@
 # ABS: A Build System
 A dead simple build system for C++ that values convention over configuration. Created due to my distaste for other build systems. This project is in its infancy; feel free to file issues.
 
-## Current Status & Future Plans (as of December 19, 2021)
+## Current Status & Future Plans (up to date as of January 22, 2022)
 - Only supports Windows for now; support for Apple platforms and Linux is planned, but not right away
 - Supports building GUI apps, console apps, dynamic libraries and static libraries
   - Both 32-bit and 64-bit
-- Limitations:
+- Known limitations:
   - My code for finding the local Visual Studio installation is not very robust
   - Adding icons to an app is not yet supported
   - The output is not as pretty as some other build systems
-  - Not all error messages are very helpful
+  - Not all error messages are as helpful as they should be
 - I currently use a very minimal JSON manifest format for project-specific configuration. This format *might* be replaced with build scripts written in C++. This could enable things like:
   - Building code written in programming languages other than C++
   - Domain-specific or platform-specific preprocessing, like generating C++/WinRT projections for the Windows API, assembling application bundles for macOS, etc.
