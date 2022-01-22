@@ -1,5 +1,5 @@
 use std::process::Command;
-use std::path::{Path, PathBuf, Component};
+use std::path::{Path, PathBuf, Component, Prefix};
 use std::fs::{self, File};
 use std::io::ErrorKind as IoErrorKind;
 use std::io::{BufReader, Write, Result as IoResult};
@@ -35,9 +35,14 @@ fn canonicalize(p: impl AsRef<Path>) -> IoResult<PathBuf> {
     let p = p.as_ref().canonicalize()?;
     let mut components = p.components();
     match components.next() {
-        Some(Component::Prefix(_)) => {
-            let mut ret_val = PathBuf::new();
+        Some(Component::Prefix(prefix)) => {
+            let mut ret_val = match prefix.kind() {
+                Prefix::VerbatimDisk(letter) => PathBuf::from(format!(r"{}:\", letter as char)),
+                _ => PathBuf::new(),
+            };
+            
             ret_val.extend(components);
+            dbg!(&ret_val);
             Ok(ret_val)
         },
         _ => Ok(p.to_path_buf()),
