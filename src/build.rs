@@ -34,11 +34,13 @@ pub struct BuildEnvironment<'a> {
     config: &'a ProjectConfig,
     build_options: &'a BuildOptions,
     definitions: &'a [(&'a str, &'a str)],
+    project_path: PathBuf,
     artifact_path: PathBuf,
     src_dir_path: PathBuf,
     assets_dir_path: PathBuf,
     objs_path: PathBuf,
     src_deps_path: PathBuf,
+    dependency_headers_path: PathBuf,
 
     file_edit_times: HashMap<PathBuf, u64>,
 }
@@ -64,6 +66,7 @@ impl From<io::Error> for BuildError {
 pub struct SrcPaths {
     pub root: PathBuf,
     pub src_paths: Vec<PathBuf>,
+    pub header_paths: Vec<PathBuf>,
     pub children: Vec<SrcPaths>,
 }
 
@@ -80,6 +83,7 @@ impl SrcPaths {
                     if let Some(extension) = path.extension().and_then(OsStr::to_str) {
                         match extension {
                             "cpp" | "cxx" | "cc"   => paths.src_paths.push(path),
+                            "h" | "hpp" => paths.header_paths.push(path),
                             _ => {},
                         }
                     }
@@ -209,8 +213,10 @@ impl<'a> BuildEnvironment<'a> {
         let artifact_path = artifact_path.into();
         let objs_path = artifact_path.join("obj");
         let src_deps_path = artifact_path.join("src_deps");
+        let dependency_headers_path = artifact_path.join("dependency_headers");
         fs::create_dir_all(&objs_path)?;
         fs::create_dir_all(&src_deps_path)?;
+        fs::create_dir_all(&dependency_headers_path)?;
 
         let src_dir_path = project_path.join("src");
         let assets_dir_path = project_path.join("assets");
@@ -229,11 +235,13 @@ impl<'a> BuildEnvironment<'a> {
             config,
             build_options,
             definitions,
+            project_path,
             artifact_path,
             src_dir_path,
             assets_dir_path,
             objs_path,
             src_deps_path,
+            dependency_headers_path,
 
             file_edit_times: HashMap::new(),
         })
@@ -324,6 +332,19 @@ impl<'a> BuildEnvironment<'a> {
         )
     }
 
+    fn copy_headers(&self, paths: &SrcPaths, dependency_name: &OsStr, root: &Path) -> Result<(), BuildError> {
+        let dest_headers_path = self.dependency_headers_path.join(dependency_name);
+        for header_path in &paths.header_paths {
+            let copied_header_path = self.get_artifact_path_relative_to(header_path, root, &dest_headers_path);
+            fs::create_dir_all(copied_header_path.parent().unwrap())?;
+            fs::copy(header_path, &copied_header_path)?;
+        }
+        for child in &paths.children {
+            self.copy_headers(child, dependency_name, root)?;
+        }
+        Ok(())
+    }
+
     pub fn build(&mut self) -> Result<(), BuildError> {
         let paths = match SrcPaths::from_root(&self.src_dir_path) {
             Ok(paths) => paths,
@@ -335,6 +356,16 @@ impl<'a> BuildEnvironment<'a> {
                 }
             }
         };
+        for path in &self.config.dependencies {
+            let path = self.project_path.join(path);
+            let path = crate::canonicalize(path).unwrap();
+            // TODO: use project name instead of the file name
+            let project_name = path.file_name().unwrap();
+            let path = path.join("src");
+
+            let paths = SrcPaths::from_root(&path).unwrap();
+            self.copy_headers(&paths, project_name, &paths.root)?;
+        }
         let pch = paths.src_paths.iter().any(|path| path.file_name() == Some(OsStr::new("pch.cpp")));
         if pch {
             let pch_path = self.src_dir_path.join("pch.cpp");
@@ -403,13 +434,18 @@ impl<'a> BuildEnvironment<'a> {
     /// Goes from a src file path to an artifact path relative to output_dir_path
     /// (e.g., src/hello/world.cpp -> abs/debug/obj/hello/world.obj)
     fn get_artifact_path(&self, src_path: impl AsRef<Path>, output_dir_path: impl AsRef<Path>, extension: impl AsRef<OsStr>) -> PathBuf {
-        let mut path = output_dir_path.as_ref().to_owned();
-        // Isolate the src file name
-        let src_path = src_path.as_ref().strip_prefix(&self.src_dir_path)
-            .expect("path to a src file must have src directory as a prefix");
-        path.push(src_path);
+        let mut path = self.get_artifact_path_relative_to(src_path, &self.src_dir_path, output_dir_path);
         let succ = path.set_extension(extension);
         assert!(succ);
+        path
+    }
+
+    fn get_artifact_path_relative_to(&self, src_path: impl AsRef<Path>, relative_to: impl AsRef<Path>, output_dir_path: impl AsRef<Path>) -> PathBuf {
+        let mut path = output_dir_path.as_ref().to_owned();
+        // Isolate the src file name
+        let src_path = src_path.as_ref().strip_prefix(relative_to)
+            .expect("path to a src file must have src directory as a prefix");
+        path.push(src_path);
         path
     }
 
@@ -570,6 +606,8 @@ impl<'a> BuildEnvironment<'a> {
                     flags.push("/I".into());
                     flags.push(path.as_os_str().to_owned());
                 }
+                flags.push("/I".into());
+                flags.push(self.dependency_headers_path.as_os_str().to_os_string());
                 flags.push("/I".into());
                 flags.push(self.src_dir_path.as_os_str().to_owned());
                 flags

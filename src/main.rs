@@ -32,7 +32,7 @@ fn kill_debugger() -> Option<i32> {
 }
 
 // Path::canonicalize() adds an unwanted verbatim prefix on windows. This removes it.
-fn canonicalize(p: impl AsRef<Path>) -> IoResult<PathBuf> {
+pub fn canonicalize(p: impl AsRef<Path>) -> IoResult<PathBuf> {
     let p = p.as_ref().canonicalize()?;
     let mut components = p.components();
     match components.next() {
