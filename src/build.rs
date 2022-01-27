@@ -332,20 +332,19 @@ impl<'a> BuildEnvironment<'a> {
         )
     }
 
-    fn copy_headers(&self, paths: &SrcPaths, dependency_name: &OsStr, root: &Path) -> Result<(), BuildError> {
-        let dest_headers_path = self.dependency_headers_path.join(dependency_name);
+    fn copy_headers(&self, paths: &SrcPaths, dependency_name: &OsStr, root: &Path, dest_headers_path: &Path) -> Result<(), BuildError> {
         for header_path in &paths.header_paths {
             let copied_header_path = self.get_artifact_path_relative_to(header_path, root, &dest_headers_path);
             fs::create_dir_all(copied_header_path.parent().unwrap())?;
             fs::copy(header_path, &copied_header_path)?;
         }
         for child in &paths.children {
-            self.copy_headers(child, dependency_name, root)?;
+            self.copy_headers(child, dependency_name, root, dest_headers_path)?;
         }
         Ok(())
     }
 
-    pub fn build(&mut self) -> Result<(), BuildError> {
+    pub fn build(&mut self) -> Result<bool, BuildError> {
         let paths = match SrcPaths::from_root(&self.src_dir_path) {
             Ok(paths) => paths,
             Err(error) => {
@@ -362,9 +361,13 @@ impl<'a> BuildEnvironment<'a> {
             // TODO: use project name instead of the file name
             let project_name = path.file_name().unwrap();
             let path = path.join("src");
-
             let paths = SrcPaths::from_root(&path).unwrap();
-            self.copy_headers(&paths, project_name, &paths.root)?;
+            let dest_headers_path = self.dependency_headers_path.join(project_name);
+            // Don't allow a project to include headers that were deleted from the original dependency
+            // project. Ignore any errors, because the destination directory may not exist yet, and
+            // because this is not a critical operation.
+            let _ = fs::remove_dir_all(&dest_headers_path);
+            self.copy_headers(&paths, project_name, &paths.root, &dest_headers_path)?;
         }
         let pch = paths.src_paths.iter().any(|path| path.file_name() == Some(OsStr::new("pch.cpp")));
         if pch {
@@ -414,9 +417,11 @@ impl<'a> BuildEnvironment<'a> {
         while super::kill_process(&product_name) == Some(1) {}
             
         let should_relink = self.should_build_artifact(&dependencies, &product_path)?;
-        if should_relink {
-            self.link(&product_path, obj_paths)?;
-        }
+        let built_artifact = if should_relink {
+            self.link(&product_path, obj_paths)?
+        } else {
+            true
+        };
 
         let mut package_file_paths = vec![product_path, pdb_path];
         if self.assets_dir_path.exists() && fs::metadata(&self.assets_dir_path)?.is_dir() {
@@ -428,7 +433,7 @@ impl<'a> BuildEnvironment<'a> {
             }
             package_file_paths.push(self.assets_dir_path.clone());
         }
-        Ok(())
+        Ok(built_artifact)
     }
 
     /// Goes from a src file path to an artifact path relative to output_dir_path
@@ -660,9 +665,10 @@ impl<'a> BuildEnvironment<'a> {
         &mut self,
         output_path: impl AsRef<Path>,
         obj_paths: impl IntoIterator<Item=impl AsRef<Path>> + Clone,
-    ) -> Result<(), BuildError> {
+    ) -> Result<bool, BuildError> {
         println!("Linking {}...", output_path.as_ref().to_string_lossy());
         let host = Platform::host();
+        let output_path = output_path.as_ref();
         let mut args = match host.os() {
             Os::Windows => {
                 let mut flags: Vec<OsString> = vec![
@@ -704,19 +710,21 @@ impl<'a> BuildEnvironment<'a> {
         args.push(
             cmd_flag(
                 "/out:",
-                output_path.as_ref(),
+                output_path,
             )
         );
         for path in obj_paths {
             args.push(path.as_ref().as_os_str().to_owned());
         }
         if matches!(self.config.output_type, OutputType::StaticLibrary) {
-            run_cmd("lib.exe", &args, &self.toolchain_paths.bin_paths, BuildError::LinkerError)
+            run_cmd("lib.exe", &args, &self.toolchain_paths.bin_paths, BuildError::LinkerError)?;
+            Ok(output_path.exists())
         } else {
             for path in &self.config.link_libraries {
                 args.push(path.into());
             }
-            run_cmd("link.exe", &args, &self.toolchain_paths.bin_paths, BuildError::LinkerError)
+            run_cmd("link.exe", &args, &self.toolchain_paths.bin_paths, BuildError::LinkerError)?;
+            Ok(true)
         }
     }
 }

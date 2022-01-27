@@ -353,7 +353,7 @@ void print_hello_world() {{
             validate_dependencies(&mut projects, &mut link_libraries, &config.name, cxx_options, &config.name);
 
             fn build_all<'a>(target: Platform, build_options: &BuildOptions, dependencies: impl IntoIterator<Item=&'a mut Project>, root_project: &mut Project, link_libraries: &[String]) -> (PathBuf, ToolchainPaths) {
-                fn build(target: Platform, build_options: &BuildOptions, config: &ProjectConfig, config_path: &Path) -> (PathBuf, ToolchainPaths) {
+                fn build(target: Platform, build_options: &BuildOptions, config: &ProjectConfig, config_path: &Path) -> (Option<PathBuf>, ToolchainPaths) {
                     let mode = match build_options.compile_mode {
                         CompileMode::Debug => "debug",
                         CompileMode::Release => "release",
@@ -375,24 +375,34 @@ void print_hello_world() {{
                         &artifact_path,
                     ).unwrap();
         
-                    if let Some(error) = env.build().err() {
-                        env.fail(error);
+                    match env.build() {
+                        Ok(produced_artifact) => {
+                            println!("Build succeeded.");
+                            let artifact_path = if produced_artifact {
+                                Some(artifact_path)
+                            } else {
+                                None
+                            };
+                            (artifact_path, toolchain_paths)
+                        }
+                        Err(error) => env.fail(error)
                     }
     
-                    println!("Build succeeded.");
-                    (artifact_path, toolchain_paths)
                 }
                 let mut link_libraries = Vec::from(link_libraries);
                 for project in dependencies {
                     project.config.adapt_to_workspace(&root_project.config);
-                    let (mut artifact_path, _) = build(target, build_options, &project.config, &project.config_path);
-                    artifact_path.push(format!("{}.lib", project.config.name));
-                    link_libraries.push(artifact_path.as_os_str().to_string_lossy().into());
+                    let (artifact_path, _) = build(target, build_options, &project.config, &project.config_path);
+                    if let Some(mut artifact_path) = artifact_path {
+                        artifact_path.push(format!("{}.lib", project.config.name));
+                        link_libraries.push(artifact_path.as_os_str().to_string_lossy().into());
+                    }
                     // Add spacing between projects
                     println!();
                 }
                 root_project.config.link_libraries = link_libraries;
-                build(target, build_options, &root_project.config, &root_project.config_path)
+                let (artifact_path, toolchain_paths) = build(target, build_options, &root_project.config, &root_project.config_path);
+                (artifact_path.unwrap(), toolchain_paths)
             }
             let mut root_project = projects.remove(&config.name).unwrap();
             let mut dependencies: Vec<Project> = projects.into_iter().map(|(_, val)| val).collect();
