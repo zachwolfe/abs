@@ -4,9 +4,10 @@ use std::io::{self, BufReader};
 use std::process::Command;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::array::IntoIter;
 use std::iter::once;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 use tokio::task;
@@ -39,6 +40,7 @@ pub struct BuildEnvironment<'a> {
     dependency_headers_path: PathBuf,
 
     file_edit_times: HashMap<PathBuf, u64>,
+    unique_compiler_output: Arc<Mutex<HashSet<CompilerOutput>>>,
 }
 
 #[derive(Debug)]
@@ -240,6 +242,7 @@ impl<'a> BuildEnvironment<'a> {
             dependency_headers_path,
 
             file_edit_times: HashMap::new(),
+            unique_compiler_output: Default::default(),
         })
     }
 
@@ -601,22 +604,28 @@ impl<'a> BuildEnvironment<'a> {
             },
         };
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        task::spawn(async move {
+        let (tx, mut rx) = mpsc::unbounded_channel::<CompilerOutput>();
+        let unique_output = self.unique_compiler_output.clone();
+        let handle = task::spawn(async move {
+            // let unique_output = ;
             while let Some(output) = rx.recv().await {
-                match output {
-                    CompilerOutput::Begun { first_line } => println!("\nBEGIN:\n{}\nEND\n", first_line),
-                    CompilerOutput::Error(error) => println!("\nBEGIN:\n{}\nEND\n", error),
-                    CompilerOutput::Warning(warning) => println!("\nBEGIN:\n{}\nEND\n", warning),
+                if unique_output.lock().unwrap().insert(output.clone()) {
+                    match output {
+                        CompilerOutput::Begun { first_line } => println!("{}", first_line),
+                        CompilerOutput::Error(error) => println!("{}", error),
+                        CompilerOutput::Warning(warning) => println!("{}", warning),
+                    }
                 }
             }
         });
 
-        if compile_cxx(&self.toolchain_paths, flags, tx).await {
+        let val = if compile_cxx(&self.toolchain_paths, flags, tx).await {
             Ok(())
         } else {
             Err(BuildError::CompilerError)
-        }
+        };
+        let _ = handle.await;
+        val
     }
 
     pub fn link(

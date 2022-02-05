@@ -64,7 +64,7 @@ pub async fn run_cmd(name: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl 
         .map(|code| code.success()).unwrap_or(false)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CompilerOutput {
     Begun { first_line: String },
     Warning(String),
