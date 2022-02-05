@@ -4,17 +4,22 @@ use std::io::{self, BufReader};
 use std::process::Command;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::array::IntoIter;
 use std::iter::once;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
-use serde::Deserialize;
+use tokio::sync::mpsc;
+use tokio::task;
+use futures::future::join_all;
 
-use crate::proj_config::{Platform, Os, ProjectConfig, CxxStandard, OutputType};
+use serde::{Serialize, Deserialize};
+
+use crate::proj_config::{Platform, Os, ProjectConfig, OutputType};
 use crate::cmd_options::{BuildOptions, CompileMode};
 use crate::canonicalize;
 use crate::toolchain_paths::ToolchainPaths;
+use crate::build_manager::{CompilerOutput, CompileFlags, compile_cxx};
 
 pub struct BuildEnvironment<'a> {
     config_path: PathBuf,
@@ -33,8 +38,10 @@ pub struct BuildEnvironment<'a> {
     objs_path: PathBuf,
     src_deps_path: PathBuf,
     dependency_headers_path: PathBuf,
+    warning_cache_path: PathBuf,
 
     file_edit_times: HashMap<PathBuf, u64>,
+    unique_compiler_output: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Debug)]
@@ -170,6 +177,11 @@ enum PchOption {
     NoPch,
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct WarningCache {
+    warnings: Vec<String>,
+}
+
 impl<'a> BuildEnvironment<'a> {
     pub fn new(
         config: &'a ProjectConfig,
@@ -206,9 +218,11 @@ impl<'a> BuildEnvironment<'a> {
         let objs_path = artifact_path.join("obj");
         let src_deps_path = artifact_path.join("src_deps");
         let dependency_headers_path = artifact_path.join("dependency_headers");
+        let warning_cache_path = artifact_path.join("warning_cache");
         fs::create_dir_all(&objs_path)?;
         fs::create_dir_all(&src_deps_path)?;
         fs::create_dir_all(&dependency_headers_path)?;
+        fs::create_dir_all(&warning_cache_path)?;
 
         let src_dir_path = project_path.join("src");
         let assets_dir_path = project_path.join("assets");
@@ -234,8 +248,10 @@ impl<'a> BuildEnvironment<'a> {
             objs_path,
             src_deps_path,
             dependency_headers_path,
+            warning_cache_path,
 
             file_edit_times: HashMap::new(),
+            unique_compiler_output: Default::default(),
         })
     }
 
@@ -336,7 +352,7 @@ impl<'a> BuildEnvironment<'a> {
         Ok(())
     }
 
-    pub fn build(&mut self) -> Result<bool, BuildError> {
+    pub async fn build(&mut self) -> Result<bool, BuildError> {
         let paths = match SrcPaths::from_root(&self.src_dir_path) {
             Ok(paths) => paths,
             Err(error) => {
@@ -376,11 +392,11 @@ impl<'a> BuildEnvironment<'a> {
 
             if should_rebuild {
                 println!("Generating pre-compiled header");
-                self.compile(pch_path, &self.objs_path, PchOption::GeneratePch)?;
+                self.compile(pch_path, &self.objs_path, PchOption::GeneratePch).await?;
             }
         };
         let mut obj_paths = Vec::new();
-        self.compile_sources(&paths, &mut obj_paths, pch)?;
+        self.compile_sources(&paths, &mut obj_paths, pch).await?;
 
         let extension = match self.config.output_type {
             OutputType::ConsoleApp | OutputType::GuiApp => "exe",
@@ -446,17 +462,20 @@ impl<'a> BuildEnvironment<'a> {
         path
     }
 
-    pub fn assemble_sources_to_rebuild<'b>(&mut self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, pch: bool, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
+    pub fn assemble_sources_to_rebuild<'b>(&mut self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, cached_warnings: &mut Vec<String>, pch: bool, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
+            let warning_cache_path = self.get_artifact_path(path, &self.warning_cache_path, "warnings");
             obj_paths.push(obj_path.clone());
             let is_pch = path.file_name() == Some(OsStr::new("pch.cpp")) && path.parent() == Some(&self.src_dir_path);
-            let should_rebuild = !is_pch && if let Some(dependencies) = self.discover_src_deps(path)? {
-                let dependencies = DependencyBuilder::default()
+            let dependencies = self.discover_src_deps(path)?.map(|dependencies| {
+                DependencyBuilder::default()
                     .file(path)
                     .files(dependencies)
-                    .build();
+                    .build()
+            });
+            let should_rebuild = !is_pch && if let Some(dependencies) = &dependencies {
                 self.should_build_artifact(dependencies, &obj_path)?
             } else {
                 true
@@ -465,61 +484,76 @@ impl<'a> BuildEnvironment<'a> {
             
             if should_rebuild {
                 sources.push(path.clone());
+            } else {
+                let warning_cache_out_of_date = if let Some(dependencies) = &dependencies {
+                    self.should_build_artifact(dependencies, &warning_cache_path)?
+                } else {
+                    true
+                };
+                if !warning_cache_out_of_date {
+                    if let Ok(warning_cache) = fs::read_to_string(warning_cache_path) {
+                        if let Ok(warning_cache) = serde_json::from_str::<WarningCache>(&warning_cache) {
+                            for warning in warning_cache.warnings {
+                                cached_warnings.push(warning);
+                            }
+                        }
+                    }
+                }
             }
         }
 
         for child in &paths.children {
-            self.assemble_sources_to_rebuild(child, obj_paths, pch, sources)?;
+            self.assemble_sources_to_rebuild(child, obj_paths, cached_warnings, pch, sources)?;
         }
 
         Ok(())
     }
 
-    pub fn compile_sources<'b>(
+    pub async fn compile_sources<'b>(
         &mut self,
         paths: &'b SrcPaths,
         obj_paths: &mut Vec<PathBuf>,
         pch: bool,
     ) -> Result<(), BuildError> {
         let mut jobs = Vec::new();
-        self.assemble_sources_to_rebuild(paths, obj_paths, pch, &mut jobs)?;
+        let mut cached_warnings = Vec::new();
+        self.assemble_sources_to_rebuild(paths, obj_paths, &mut cached_warnings, pch, &mut jobs)?;
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
+        let mut job_futures = Vec::new();
+        for job in jobs {
+            let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
+            let mut obj_subdir_path = obj_path;
+            obj_subdir_path.pop();
+            fs::create_dir_all(&obj_subdir_path).unwrap();
+            let objs_path = self.objs_path.clone();
 
-        let (sender, receiver) = mpsc::channel();
-
-        // TODO: this could probably have been achieved more efficiently with a parallel iterator
-        rayon::scope(move |scope| {
-            let num_jobs = jobs.len();
-            for job in jobs {
-                let sender = sender.clone();
-                let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
-                let mut obj_subdir_path = obj_path;
-                obj_subdir_path.pop();
-                fs::create_dir_all(&obj_subdir_path).unwrap();
-                let objs_path = self.objs_path.clone();
-                let salf = &*self;
-                scope.spawn(move |_| {
-                    let res = salf.compile(job, objs_path, pch_option);
-                    sender.send(res).unwrap();
-                });
-            }
-            let mut res = Ok(());
-            let mut succ = 0;
-            let mut fail = 0;
-            for _ in 0..num_jobs {
-                match receiver.recv().unwrap() {
-                    Ok(()) => succ += 1,
-                    Err(err) => {
-                        res = Err(err);
-                        fail += 1;
-                    }
+            let fut = self.compile(job, objs_path, pch_option);
+            job_futures.push(fut);
+        }
+        let mut res = Ok(());
+        let mut succ = 0;
+        let mut fail = 0;
+        let num_jobs = job_futures.len();
+        for job_res in join_all(job_futures).await {
+            match job_res {
+                Ok(()) => succ += 1,
+                Err(err) => {
+                    res = Err(err);
+                    fail += 1;
                 }
             }
-            if fail > 0 {
-                println!("Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
+        }
+
+        for warning in cached_warnings {
+            if self.unique_compiler_output.lock().unwrap().insert(warning.clone()) {
+                println!("{}", warning);
             }
-            res
-        })
+        }
+
+        if fail > 0 {
+            println!("Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
+        }
+        res
     }
 
     fn discover_src_deps(&mut self, path: impl AsRef<Path>) -> Result<Option<Vec<PathBuf>>, BuildError> {
@@ -557,100 +591,88 @@ impl<'a> BuildEnvironment<'a> {
             Ok(Some(dependencies.build()))
         }
     }
-
-    fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
+    
+    async fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
         let path = path.as_ref();
-
         let host = Platform::host();
-        let mut args = match host.os() {
+        let flags = match host.os() {
             Os::Windows => {
-                let mut flags: Vec<OsString> = vec![
-                    "/W3".into(),
-                    "/Zi".into(),
-                    "/EHsc".into(),
-                    "/c".into(),
-                    "/FS".into(),
-                ];
-                if self.config.cxx_options.rtti {
-                    flags.push("/GR".into());
-                } else {
-                    flags.push("/GR-".into());
-                }
-                if self.config.cxx_options.async_await {
-                    flags.push("/await".into());
-                }
-                match self.config.cxx_options.standard {
-                    CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".into()),
-                    CxxStandard::Cxx17 => flags.push("/std:c++17".into()),
-                    CxxStandard::Cxx20 => {
-                        flags.push("/std:c++latest".into());
-                        // flags.push("/Zc:preprocessor".into());
-                    }
-                }
+                let mut flags = CompileFlags::empty()
+                    .singles([
+                        "/W3",
+                        "/Zi",
+                        "/EHsc",
+                        "/c",
+                        "/FS",
+                    ])
+                    .rtti(self.config.cxx_options.rtti)
+                    .async_await(self.config.cxx_options.async_await)
+                    .cxx_standard(self.config.cxx_options.standard);
+
                 match self.build_options.compile_mode {
-                    CompileMode::Debug => {
-                        flags.push("/MDd".into());
-                        flags.push("/RTC1".into());
+                    CompileMode::Debug => flags = flags.singles(["/MDd", "/RTC1"]),
+                    CompileMode::Release => flags = flags.single("/O2"),
+                }
+                flags = flags
+                    .defines(self.definitions.iter().cloned())
+                    .include_paths(&self.toolchain_paths.include_paths)
+                    .include_paths([
+                        &self.dependency_headers_path,
+                        &self.src_dir_path,
+                    ]);
+                match pch {
+                    PchOption::GeneratePch | PchOption::UsePch => {
+                        let path = self.get_artifact_path(self.src_dir_path.join("pch.h"), &obj_path, "pch");
+                        flags = flags.pch_path(path, matches!(pch, PchOption::GeneratePch));
                     },
-                    CompileMode::Release => {
-                        flags.push("/O2".into());
-                    },
+                    _ => {}
                 }
-                for (name, val) in self.definitions {
-                    flags.push(format!("/D{}={}", name, val).into());
-                }
-                for path in &self.toolchain_paths.include_paths {
-                    flags.push("/I".into());
-                    flags.push(path.as_os_str().to_owned());
-                }
-                flags.push("/I".into());
-                flags.push(self.dependency_headers_path.as_os_str().to_os_string());
-                flags.push("/I".into());
-                flags.push(self.src_dir_path.as_os_str().to_owned());
+                let src_deps_json_path = self.get_artifact_path(&path, &self.src_deps_path, "json");
+                let src_deps_parent = src_deps_json_path.parent().unwrap();
+                fs::create_dir_all(src_deps_parent)?;
+                flags = flags
+                    .obj_path(self.get_artifact_path(path, &obj_path, "obj"))
+                    .double("/Fd", self.objs_path.join(&format!("{}.pdb", &self.config.name)))
+                    .double("/sourceDependencies", src_deps_json_path)
+                    .src_path(path);
                 flags
             },
         };
 
-        println!("Compiling {}", path.as_os_str().to_string_lossy());
-        match pch {
-            PchOption::GeneratePch | PchOption::UsePch => args.push(
-                cmd_flag(
-                    "/Fp",
-                    self.get_artifact_path(self.src_dir_path.join("pch.h"), &obj_path, "pch"),
-                )
-            ),
-            PchOption::NoPch => {},
-        }
-        match pch {
-            PchOption::GeneratePch => args.push("/Ycpch.h".into()),
-            PchOption::UsePch => args.push("/Yupch.h".into()),
-            PchOption::NoPch => {},
-        }
-        args.push(
-            cmd_flag(
-                "/Fo",
-                self.get_artifact_path(path, &obj_path, "obj"),
-            )
-        );
-        args.push(
-            cmd_flag(
-                "/Fd",
-                self.objs_path.join(&format!("{}.pdb", &self.config.name))
-            )
-        );
-        let src_deps_json_path = self.get_artifact_path(&path, &self.src_deps_path, "json");
-        let src_deps_parent = src_deps_json_path.parent().unwrap();
-        fs::create_dir_all(src_deps_parent)?;
-        args.push(
-            cmd_flag(
-                "/sourceDependencies",
-                src_deps_json_path,
-            )
-        );
-        args.push(path.as_os_str().to_owned());
-        run_cmd("cl.exe", &args, &self.toolchain_paths.bin_paths, BuildError::CompilerError)?;
+        let (tx, mut rx) = mpsc::unbounded_channel::<CompilerOutput>();
+        let unique_output = self.unique_compiler_output.clone();
+        let handle = task::spawn(async move {
+            // let unique_output = ;
+            let mut warning_cache = WarningCache::default();
+            while let Some(output) = rx.recv().await {
+                match &output {
+                    CompilerOutput::Begun { first_line } => println!("{}", first_line),
+                    CompilerOutput::Error(s) | CompilerOutput::Warning(s) => {
+                        if unique_output.lock().unwrap().insert(s.clone()) {
+                            println!("{}", s);
+                        }
+                        if matches!(output, CompilerOutput::Warning(_)) {
+                            warning_cache.warnings.push(s.clone());
+                        }
+                    }
+                }
+            }
+            warning_cache
+        });
 
-        Ok(())
+        let val = if compile_cxx(&self.toolchain_paths, flags, tx).await {
+            Ok(())
+        } else {
+            Err(BuildError::CompilerError)
+        };
+        let warning_cache = handle.await.unwrap();
+        let warning_cache_path = self.get_artifact_path(path, &self.warning_cache_path, "warnings");
+        if let Some(parent) = warning_cache_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let warning_cache = serde_json::to_string(&warning_cache).unwrap();
+        fs::write(warning_cache_path, warning_cache)?;
+        val
     }
 
     pub fn link(

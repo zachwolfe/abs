@@ -14,10 +14,11 @@ use clap::Parser;
 mod build;
 mod cmd_options;
 mod proj_config;
+mod build_manager;
 mod toolchain_paths;
 
 use proj_config::{ProjectConfig, OutputType, CxxOptions, Platform};
-use cmd_options::{CmdOptions, CompileMode, Subcommand, BuildOptions};
+use cmd_options::{CmdOptions, CompileMode, Subcommand, Target, BuildOptions};
 use build::BuildEnvironment;
 use toolchain_paths::ToolchainPaths;
 
@@ -52,9 +53,8 @@ pub fn canonicalize(p: impl AsRef<Path>) -> IoResult<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn main() {
-    use crate::cmd_options::Target;
-
+#[tokio::main]
+async fn main() {
     let options = CmdOptions::parse();
     macro_rules! _task_failed {
         () => {
@@ -354,8 +354,8 @@ void print_hello_world() {{
             }
             validate_dependencies(&mut projects, &mut link_libraries, &config.name, cxx_options, &config.name);
 
-            fn build_all<'a>(target: Platform, build_options: &BuildOptions, dependencies: impl IntoIterator<Item=&'a mut Project>, root_project: &mut Project, link_libraries: &[String]) -> (PathBuf, ToolchainPaths) {
-                fn build(target: Platform, build_options: &BuildOptions, config: &ProjectConfig, config_path: &Path) -> (Option<PathBuf>, ToolchainPaths) {
+            async fn build_all<'a>(target: Platform, build_options: &BuildOptions, dependencies: impl IntoIterator<Item=&'a mut Project>, root_project: &mut Project, link_libraries: &[String]) -> (PathBuf, ToolchainPaths) {
+                async fn build(target: Platform, build_options: &BuildOptions, config: &ProjectConfig, config_path: &Path) -> (Option<PathBuf>, ToolchainPaths) {
                     let mode = match build_options.compile_mode {
                         CompileMode::Debug => "debug",
                         CompileMode::Release => "release",
@@ -377,7 +377,7 @@ void print_hello_world() {{
                         &artifact_path,
                     ).unwrap();
         
-                    match env.build() {
+                    match env.build().await {
                         Ok(produced_artifact) => {
                             println!("Build succeeded.");
                             let artifact_path = if produced_artifact {
@@ -394,7 +394,7 @@ void print_hello_world() {{
                 let mut link_libraries = Vec::from(link_libraries);
                 for project in dependencies {
                     project.config.adapt_to_workspace(&root_project.config);
-                    let (artifact_path, _) = build(target, build_options, &project.config, &project.config_path);
+                    let (artifact_path, _) = build(target, build_options, &project.config, &project.config_path).await;
                     if let Some(mut artifact_path) = artifact_path {
                         artifact_path.push(format!("{}.lib", project.config.name));
                         link_libraries.push(artifact_path.as_os_str().to_string_lossy().into());
@@ -403,7 +403,7 @@ void print_hello_world() {{
                     println!();
                 }
                 root_project.config.link_libraries = link_libraries;
-                let (artifact_path, toolchain_paths) = build(target, build_options, &root_project.config, &root_project.config_path);
+                let (artifact_path, toolchain_paths) = build(target, build_options, &root_project.config, &root_project.config_path).await;
                 (artifact_path.unwrap(), toolchain_paths)
             }
             let mut root_project = projects.remove(&config.name).unwrap();
@@ -423,7 +423,7 @@ void print_hello_world() {{
                         fail_immediate!("Target `all` is not valid for `{}` subcommand. Please use the `build` subcommand instead.", sub_command_name);
                     } else {
                         for &supported_target in &config.supported_targets {
-                            build_all(supported_target, build_options, &mut dependencies, &mut root_project, &link_libraries);
+                            build_all(supported_target, build_options, &mut dependencies, &mut root_project, &link_libraries).await;
                         }
                         return;
                     }
@@ -461,7 +461,7 @@ void print_hello_world() {{
                             }
                         }
                     }
-                    let (artifact_path, toolchain_paths) = build_all(target, build_options, &mut dependencies, &mut root_project, &link_libraries);
+                    let (artifact_path, toolchain_paths) = build_all(target, build_options, &mut dependencies, &mut root_project, &link_libraries).await;
                     (config, artifact_path, toolchain_paths)
                 },
                 Target::Platform(target) => {
@@ -478,7 +478,7 @@ void print_hello_world() {{
                         fail_immediate!("`{}` subcommand cannot proceed because your host platform, {:?}, is not compatible with the supplied target {:?}. Please use the `build` subcommand instead.", sub_command_name, host, target);
                     }
 
-                    let (artifact_path, toolchain_paths) = build_all(target, build_options, &mut dependencies, &mut root_project, &link_libraries);
+                    let (artifact_path, toolchain_paths) = build_all(target, build_options, &mut dependencies, &mut root_project, &link_libraries).await;
                     (config, artifact_path, toolchain_paths)
                 }
             }
