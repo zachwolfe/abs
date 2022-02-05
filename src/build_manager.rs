@@ -92,12 +92,89 @@ pub async fn run_cmd(name: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl 
     stderr.unwrap();
 }
 
+#[derive(Debug)]
+enum CompilerOutput {
+    Begun { first_line: String },
+    Warning(String),
+    Error(String),
+}
+
 async fn compile(toolchain_paths: &ToolchainPaths, compile_flags: CompileFlags) {
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
     tokio::task::spawn(async move {
+        enum ParseState {
+            NoFileName,
+            Neutral,
+            InWarning,
+            InError,
+        }
+        let mut state = ParseState::NoFileName;
         while let Some(line) = output_rx.recv().await {
             if let OutputLine::Stdout(line) = line {
-                println!("line: {}", line);
+                let output = match state {
+                    ParseState::NoFileName => {
+                        state = ParseState::Neutral;
+                        CompilerOutput::Begun { first_line: line }
+                    },
+                    ParseState::Neutral => {
+                        if let Some(index) = line.find(": ") {
+                            let bytes = line.as_bytes();
+                            if bytes.len() > index + 2 {
+                                let after = &bytes[(index + 2)..];
+                                if after.starts_with(b"warning") {
+                                    state = ParseState::InWarning;
+                                    CompilerOutput::Warning(line)
+                                } else if after.starts_with(b"error") || after.starts_with(b"fatal error") {
+                                    state = ParseState::InError;
+                                    CompilerOutput::Error(line)
+                                } else {
+                                    panic!("unexpected line format")
+                                }
+                            } else {
+                                panic!("unexpected line format")
+                            }
+                        } else {
+                            panic!("unrecognized type of line");
+                        }
+                    },
+                    ParseState::InWarning => {
+                        if let Some(index) = line.find(": ") {
+                            let bytes = line.as_bytes();
+                            if bytes.len() > index + 2 {
+                                let after = &bytes[(index + 2)..];
+                                if after.starts_with(b"error") || after.starts_with(b"fatal error") {
+                                    state = ParseState::InError;
+                                    CompilerOutput::Error(line)
+                                } else {
+                                    CompilerOutput::Warning(line)
+                                }
+                            } else {
+                                CompilerOutput::Warning(line)
+                            }
+                        } else {
+                            CompilerOutput::Warning(line)
+                        }
+                    },
+                    ParseState::InError => {
+                        if let Some(index) = line.find(": ") {
+                            let bytes = line.as_bytes();
+                            if bytes.len() > index + 2 {
+                                let after = &bytes[(index + 2)..];
+                                if after.starts_with(b"warning") {
+                                    state = ParseState::InWarning;
+                                    CompilerOutput::Warning(line)
+                                } else {
+                                    CompilerOutput::Error(line)
+                                }
+                            } else {
+                                CompilerOutput::Error(line)
+                            }
+                        } else {
+                            CompilerOutput::Error(line)
+                        }
+                    },
+                };
+                dbg!(output);
             }
         }
     });
