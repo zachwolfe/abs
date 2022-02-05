@@ -14,6 +14,7 @@ use clap::Parser;
 mod build;
 mod cmd_options;
 mod proj_config;
+mod build_manager;
 mod toolchain_paths;
 
 use proj_config::{ProjectConfig, OutputType, CxxOptions, Platform};
@@ -53,6 +54,9 @@ pub fn canonicalize(p: impl AsRef<Path>) -> IoResult<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn main() {
+    build_manager::test();
+    return;
+
     use crate::cmd_options::Target;
 
     let options = CmdOptions::parse();
