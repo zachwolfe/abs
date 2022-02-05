@@ -8,9 +8,11 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use std::process::Stdio;
 use tokio::io::{BufReader, AsyncBufReadExt};
+use tokio::sync::mpsc;
 
 use crate::toolchain_paths::ToolchainPaths;
 use crate::Platform;
+use crate::proj_config::CxxStandard;
 
 // #[derive(Default)]
 // pub struct SrcPaths<PathStorage: Default> {
@@ -47,7 +49,13 @@ use crate::Platform;
 //     scan_sources("my_path", |path, paths| )
 // }
 
-async fn run_cmd(name: impl AsRef<OsStr>, args: &[OsString], bin_paths: &[PathBuf]) {
+#[derive(Debug)]
+pub enum OutputLine {
+    Stdout(String),
+    Stderr(String),
+}
+
+pub async fn run_cmd(name: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, bin_paths: &[PathBuf], output_channel: mpsc::UnboundedSender<OutputLine>) {
     let mut path = OsString::from("%PATH%");
     for i in 0..bin_paths.len() {
         path.push(";");
@@ -61,20 +69,21 @@ async fn run_cmd(name: impl AsRef<OsStr>, args: &[OsString], bin_paths: &[PathBu
         .spawn().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    
-    let stdout_reader = tokio::task::spawn(async {
+
+    let output_channel_copy = output_channel.clone();
+    let stdout_reader = tokio::task::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Some(line) = lines.next_line().await.unwrap() {
-            println!("stdout line: {}", line);
+            output_channel_copy.send(OutputLine::Stdout(line)).unwrap();
         }
     });
 
-    let stderr_reader = tokio::task::spawn(async {
+    let stderr_reader = tokio::task::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
         while let Some(line) = lines.next_line().await.unwrap() {
-            println!("stderr line: {}", line);
+            output_channel.send(OutputLine::Stderr(line)).unwrap();
         }
     });
 
@@ -83,27 +92,95 @@ async fn run_cmd(name: impl AsRef<OsStr>, args: &[OsString], bin_paths: &[PathBu
     stderr.unwrap();
 }
 
-async fn compile(toolchain_paths: &ToolchainPaths) {
-    let mut flags: Vec<OsString> = vec![
-        "/W3".into(),
-        "/Zi".into(),
-        "/EHsc".into(),
-        "/c".into(),
-        "/FS".into(),
-    ];
-    flags.push("/FoC:\\Users\\zachr\\work\\test\\test.obj".into());
-    flags.push("/FdC:\\Users\\zachr\\work\\test\\test.pdb".into());
-    flags.push("C:\\Users\\zachr\\work\\test\\test.cpp".into());
-    run_cmd("cl.exe", &flags, &toolchain_paths.bin_paths).await;
+async fn compile(toolchain_paths: &ToolchainPaths, compile_flags: CompileFlags) {
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+    tokio::task::spawn(async move {
+        while let Some(line) = output_rx.recv().await {
+            if let OutputLine::Stdout(line) = line {
+                println!("line: {}", line);
+            }
+        }
+    });
+    run_cmd("cl.exe", compile_flags.build(), &toolchain_paths.bin_paths, output_tx).await;
+}
+
+enum CompileFlag {
+    Concrete(OsString),
+    CxxStandard(CxxStandard),
+}
+
+pub struct CompileFlags {
+    flags: Vec<CompileFlag>,
+}
+
+impl CompileFlags {
+    pub fn empty() -> Self {
+        CompileFlags { flags: Vec::new() }
+    }
+
+    fn pushing(mut self, flag: CompileFlag) -> Self {
+        self.flags.push(flag);
+        self
+    }
+
+    pub fn single(self, flag: impl Into<OsString>) -> Self {
+        self.pushing(CompileFlag::Concrete(flag.into()))
+    }
+
+    fn singles(mut self, flags: impl IntoIterator<Item=impl Into<OsString>>) -> Self {
+        self.flags.extend(flags.into_iter().map(|flag| CompileFlag::Concrete(flag.into())));
+        self
+    }
+
+    fn double(self, flag: impl AsRef<OsStr>, arg: impl AsRef<OsStr>) -> Self {
+        let mut flag = flag.as_ref().to_os_string();
+        flag.push(arg);
+        self.single(flag)
+    }
+
+    fn cxx_standard(self, standard: CxxStandard) -> Self {
+        self.pushing(CompileFlag::CxxStandard(standard))
+    }
+
+    fn build(&self) -> Vec<OsString> {
+        let mut flags = Vec::new();
+        for flag in &self.flags {
+            match flag {
+                CompileFlag::Concrete(flag) => flags.push(flag.clone()),
+                CompileFlag::CxxStandard(standard) => {
+                    match standard {
+                        CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".into()),
+                        CxxStandard::Cxx17 => flags.push("/std:c++17".into()),
+                        CxxStandard::Cxx20 => {
+                            flags.push("/std:c++latest".into());
+                        }
+                    }
+                },
+            }
+        }
+        flags
+    }
 }
 
 pub fn test() {
-    let paths = ToolchainPaths::find(Platform::Win64).unwrap();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-            compile(&paths).await;
+            let paths = ToolchainPaths::find(Platform::Win64).unwrap();
+            let flags = CompileFlags::empty()
+                .singles([
+                    "/W3",
+                    "/Zi",
+                    "/EHsc",
+                    "/c",
+                    "/FS",
+                ])
+                .double("/Fo", "C:\\Users\\zachr\\work\\test\\test.obj")
+                .double("/Fd", "C:\\Users\\zachr\\work\\test\\test.pdb")
+                .cxx_standard(CxxStandard::Cxx20)
+                .single("C:\\Users\\zachr\\work\\test\\test.cpp");
+            compile(&paths, flags).await;
         })
 }
