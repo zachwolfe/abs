@@ -14,10 +14,12 @@ use clap::Parser;
 mod build;
 mod cmd_options;
 mod proj_config;
+mod toolchain_paths;
 
 use proj_config::{ProjectConfig, OutputType, CxxOptions, Platform};
 use cmd_options::{CmdOptions, CompileMode, Subcommand, BuildOptions};
-use build::{BuildEnvironment, ToolchainPaths};
+use build::BuildEnvironment;
+use toolchain_paths::ToolchainPaths;
 
 pub fn kill_process(path: impl AsRef<Path>) -> Option<i32> {
     Command::new("taskkill")
