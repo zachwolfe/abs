@@ -25,12 +25,17 @@ pub async fn run_cmd(name: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl 
         path.push(";");
         path.push(bin_paths[i].as_os_str());
     }
-    let mut child = Command::new(name)
+    let child = Command::new(name)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .args(args)
         .env("PATH", path)
-        .spawn().unwrap();
+        .spawn();
+
+    let mut child = match child {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
@@ -39,8 +44,8 @@ pub async fn run_cmd(name: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl 
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
 
-        while let Some(line) = lines.next_line().await.unwrap() {
-            output_channel_copy.send(OutputLine::Stdout(line)).unwrap();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = output_channel_copy.send(OutputLine::Stdout(line));
         }
     });
 
@@ -48,14 +53,12 @@ pub async fn run_cmd(name: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl 
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
 
-        while let Some(line) = lines.next_line().await.unwrap() {
-            output_channel.send(OutputLine::Stderr(line)).unwrap();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = output_channel.send(OutputLine::Stderr(line));
         }
     });
 
-    let (stdout, stderr) = tokio::join!(stdout_reader, stderr_reader);
-    stdout.unwrap();
-    stderr.unwrap();
+    let (_stdout, _stderr) = tokio::join!(stdout_reader, stderr_reader);
 
     child.wait().await
         .map(|code| code.success()).unwrap_or(false)
@@ -98,14 +101,17 @@ pub async fn compile_cxx(toolchain_paths: &ToolchainPaths, compile_flags: Compil
                                     state = ParseState::InError;
                                     CompilerOutput::Error(line)
                                 } else {
-                                    // TODO: get rid of these panics. Just keeping them around for now to catch unexpected types of input during development
-                                    panic!("unexpected line format")
+                                    // Just keeping these around for now to catch unexpected types of input during development
+                                    debug_assert!(false, "unexpected line format");
+                                    continue;
                                 }
                             } else {
-                                panic!("unexpected line format")
+                                debug_assert!(false, "unexpected line format");
+                                continue;
                             }
                         } else {
-                            panic!("unrecognized type of line");
+                            debug_assert!(false, "unexpected type of line");
+                            continue;
                         }
                     },
                     ParseState::InWarning => {
@@ -146,7 +152,7 @@ pub async fn compile_cxx(toolchain_paths: &ToolchainPaths, compile_flags: Compil
                     },
                 };
 
-                output_channel.send(output).unwrap();
+                let _ = output_channel.send(output);
             }
         }
     });
