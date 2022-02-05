@@ -7,14 +7,18 @@ use std::os::windows::prelude::*;
 use std::collections::HashMap;
 use std::array::IntoIter;
 use std::iter::once;
-use std::sync::mpsc;
+
+use tokio::sync::mpsc;
+use tokio::task;
+use futures::future::join_all;
 
 use serde::Deserialize;
 
-use crate::proj_config::{Platform, Os, ProjectConfig, CxxStandard, OutputType};
+use crate::proj_config::{Platform, Os, ProjectConfig, OutputType};
 use crate::cmd_options::{BuildOptions, CompileMode};
 use crate::canonicalize;
 use crate::toolchain_paths::ToolchainPaths;
+use crate::build_manager::{CompilerOutput, CompileFlags, compile_cxx};
 
 pub struct BuildEnvironment<'a> {
     config_path: PathBuf,
@@ -336,7 +340,7 @@ impl<'a> BuildEnvironment<'a> {
         Ok(())
     }
 
-    pub fn build(&mut self) -> Result<bool, BuildError> {
+    pub async fn build(&mut self) -> Result<bool, BuildError> {
         let paths = match SrcPaths::from_root(&self.src_dir_path) {
             Ok(paths) => paths,
             Err(error) => {
@@ -376,11 +380,11 @@ impl<'a> BuildEnvironment<'a> {
 
             if should_rebuild {
                 println!("Generating pre-compiled header");
-                self.compile(pch_path, &self.objs_path, PchOption::GeneratePch)?;
+                self.compile(pch_path, &self.objs_path, PchOption::GeneratePch).await?;
             }
         };
         let mut obj_paths = Vec::new();
-        self.compile_sources(&paths, &mut obj_paths, pch)?;
+        self.compile_sources(&paths, &mut obj_paths, pch).await?;
 
         let extension = match self.config.output_type {
             OutputType::ConsoleApp | OutputType::GuiApp => "exe",
@@ -475,7 +479,7 @@ impl<'a> BuildEnvironment<'a> {
         Ok(())
     }
 
-    pub fn compile_sources<'b>(
+    pub async fn compile_sources<'b>(
         &mut self,
         paths: &'b SrcPaths,
         obj_paths: &mut Vec<PathBuf>,
@@ -484,42 +488,34 @@ impl<'a> BuildEnvironment<'a> {
         let mut jobs = Vec::new();
         self.assemble_sources_to_rebuild(paths, obj_paths, pch, &mut jobs)?;
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
+        let mut job_futures = Vec::new();
+        for job in jobs {
+            let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
+            let mut obj_subdir_path = obj_path;
+            obj_subdir_path.pop();
+            fs::create_dir_all(&obj_subdir_path).unwrap();
+            let objs_path = self.objs_path.clone();
 
-        let (sender, receiver) = mpsc::channel();
-
-        // TODO: this could probably have been achieved more efficiently with a parallel iterator
-        rayon::scope(move |scope| {
-            let num_jobs = jobs.len();
-            for job in jobs {
-                let sender = sender.clone();
-                let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
-                let mut obj_subdir_path = obj_path;
-                obj_subdir_path.pop();
-                fs::create_dir_all(&obj_subdir_path).unwrap();
-                let objs_path = self.objs_path.clone();
-                let salf = &*self;
-                scope.spawn(move |_| {
-                    let res = salf.compile(job, objs_path, pch_option);
-                    sender.send(res).unwrap();
-                });
-            }
-            let mut res = Ok(());
-            let mut succ = 0;
-            let mut fail = 0;
-            for _ in 0..num_jobs {
-                match receiver.recv().unwrap() {
-                    Ok(()) => succ += 1,
-                    Err(err) => {
-                        res = Err(err);
-                        fail += 1;
-                    }
+            let fut = self.compile(job, objs_path, pch_option);
+            job_futures.push(fut);
+        }
+        let mut res = Ok(());
+        let mut succ = 0;
+        let mut fail = 0;
+        let num_jobs = job_futures.len();
+        for job_res in join_all(job_futures).await {
+            match job_res {
+                Ok(()) => succ += 1,
+                Err(err) => {
+                    res = Err(err);
+                    fail += 1;
                 }
             }
-            if fail > 0 {
-                println!("Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
-            }
-            res
-        })
+        }
+        if fail > 0 {
+            println!("Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
+        }
+        res
     }
 
     fn discover_src_deps(&mut self, path: impl AsRef<Path>) -> Result<Option<Vec<PathBuf>>, BuildError> {
@@ -557,100 +553,70 @@ impl<'a> BuildEnvironment<'a> {
             Ok(Some(dependencies.build()))
         }
     }
-
-    fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
+    
+    async fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
         let path = path.as_ref();
-
         let host = Platform::host();
-        let mut args = match host.os() {
+        let flags = match host.os() {
             Os::Windows => {
-                let mut flags: Vec<OsString> = vec![
-                    "/W3".into(),
-                    "/Zi".into(),
-                    "/EHsc".into(),
-                    "/c".into(),
-                    "/FS".into(),
-                ];
-                if self.config.cxx_options.rtti {
-                    flags.push("/GR".into());
-                } else {
-                    flags.push("/GR-".into());
-                }
-                if self.config.cxx_options.async_await {
-                    flags.push("/await".into());
-                }
-                match self.config.cxx_options.standard {
-                    CxxStandard::Cxx11 | CxxStandard::Cxx14 => flags.push("/std:c++14".into()),
-                    CxxStandard::Cxx17 => flags.push("/std:c++17".into()),
-                    CxxStandard::Cxx20 => {
-                        flags.push("/std:c++latest".into());
-                        // flags.push("/Zc:preprocessor".into());
-                    }
-                }
+                let mut flags = CompileFlags::empty()
+                    .singles([
+                        "/W3",
+                        "/Zi",
+                        "/EHsc",
+                        "/c",
+                        "/FS",
+                    ])
+                    .rtti(self.config.cxx_options.rtti)
+                    .async_await(self.config.cxx_options.async_await)
+                    .cxx_standard(self.config.cxx_options.standard);
+
                 match self.build_options.compile_mode {
-                    CompileMode::Debug => {
-                        flags.push("/MDd".into());
-                        flags.push("/RTC1".into());
+                    CompileMode::Debug => flags = flags.singles(["/MDd", "/RTC1"]),
+                    CompileMode::Release => flags = flags.single("/O2"),
+                }
+                flags = flags
+                    .defines(self.definitions.iter().cloned())
+                    .include_paths(&self.toolchain_paths.include_paths)
+                    .include_paths([
+                        &self.dependency_headers_path,
+                        &self.src_dir_path,
+                    ]);
+                match pch {
+                    PchOption::GeneratePch | PchOption::UsePch => {
+                        let path = self.get_artifact_path(self.src_dir_path.join("pch.h"), &obj_path, "pch");
+                        flags = flags.pch_path(path, matches!(pch, PchOption::GeneratePch));
                     },
-                    CompileMode::Release => {
-                        flags.push("/O2".into());
-                    },
+                    _ => {}
                 }
-                for (name, val) in self.definitions {
-                    flags.push(format!("/D{}={}", name, val).into());
-                }
-                for path in &self.toolchain_paths.include_paths {
-                    flags.push("/I".into());
-                    flags.push(path.as_os_str().to_owned());
-                }
-                flags.push("/I".into());
-                flags.push(self.dependency_headers_path.as_os_str().to_os_string());
-                flags.push("/I".into());
-                flags.push(self.src_dir_path.as_os_str().to_owned());
+                let src_deps_json_path = self.get_artifact_path(&path, &self.src_deps_path, "json");
+                let src_deps_parent = src_deps_json_path.parent().unwrap();
+                fs::create_dir_all(src_deps_parent)?;
+                flags = flags
+                    .obj_path(self.get_artifact_path(path, &obj_path, "obj"))
+                    .double("/Fd", self.objs_path.join(&format!("{}.pdb", &self.config.name)))
+                    .double("/sourceDependencies", src_deps_json_path)
+                    .src_path(path);
                 flags
             },
         };
 
-        println!("Compiling {}", path.as_os_str().to_string_lossy());
-        match pch {
-            PchOption::GeneratePch | PchOption::UsePch => args.push(
-                cmd_flag(
-                    "/Fp",
-                    self.get_artifact_path(self.src_dir_path.join("pch.h"), &obj_path, "pch"),
-                )
-            ),
-            PchOption::NoPch => {},
-        }
-        match pch {
-            PchOption::GeneratePch => args.push("/Ycpch.h".into()),
-            PchOption::UsePch => args.push("/Yupch.h".into()),
-            PchOption::NoPch => {},
-        }
-        args.push(
-            cmd_flag(
-                "/Fo",
-                self.get_artifact_path(path, &obj_path, "obj"),
-            )
-        );
-        args.push(
-            cmd_flag(
-                "/Fd",
-                self.objs_path.join(&format!("{}.pdb", &self.config.name))
-            )
-        );
-        let src_deps_json_path = self.get_artifact_path(&path, &self.src_deps_path, "json");
-        let src_deps_parent = src_deps_json_path.parent().unwrap();
-        fs::create_dir_all(src_deps_parent)?;
-        args.push(
-            cmd_flag(
-                "/sourceDependencies",
-                src_deps_json_path,
-            )
-        );
-        args.push(path.as_os_str().to_owned());
-        run_cmd("cl.exe", &args, &self.toolchain_paths.bin_paths, BuildError::CompilerError)?;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        task::spawn(async move {
+            while let Some(output) = rx.recv().await {
+                match output {
+                    CompilerOutput::Begun { first_line } => println!("{}", first_line),
+                    CompilerOutput::Error(error) => println!("{}", error),
+                    CompilerOutput::Warning(warning) => println!("{}", warning),
+                }
+            }
+        });
 
-        Ok(())
+        if compile_cxx(&self.toolchain_paths, flags, tx).await {
+            Ok(())
+        } else {
+            Err(BuildError::CompilerError)
+        }
     }
 
     pub fn link(
