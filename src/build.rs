@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 use futures::future::join_all;
 
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 
 use crate::proj_config::{Platform, Os, ProjectConfig, OutputType};
 use crate::cmd_options::{BuildOptions, CompileMode};
@@ -38,9 +38,10 @@ pub struct BuildEnvironment<'a> {
     objs_path: PathBuf,
     src_deps_path: PathBuf,
     dependency_headers_path: PathBuf,
+    warning_cache_path: PathBuf,
 
     file_edit_times: HashMap<PathBuf, u64>,
-    unique_compiler_output: Arc<Mutex<HashSet<CompilerOutput>>>,
+    unique_compiler_output: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Debug)]
@@ -176,6 +177,11 @@ enum PchOption {
     NoPch,
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct WarningCache {
+    warnings: Vec<String>,
+}
+
 impl<'a> BuildEnvironment<'a> {
     pub fn new(
         config: &'a ProjectConfig,
@@ -212,9 +218,11 @@ impl<'a> BuildEnvironment<'a> {
         let objs_path = artifact_path.join("obj");
         let src_deps_path = artifact_path.join("src_deps");
         let dependency_headers_path = artifact_path.join("dependency_headers");
+        let warning_cache_path = artifact_path.join("warning_cache");
         fs::create_dir_all(&objs_path)?;
         fs::create_dir_all(&src_deps_path)?;
         fs::create_dir_all(&dependency_headers_path)?;
+        fs::create_dir_all(&warning_cache_path)?;
 
         let src_dir_path = project_path.join("src");
         let assets_dir_path = project_path.join("assets");
@@ -240,6 +248,7 @@ impl<'a> BuildEnvironment<'a> {
             objs_path,
             src_deps_path,
             dependency_headers_path,
+            warning_cache_path,
 
             file_edit_times: HashMap::new(),
             unique_compiler_output: Default::default(),
@@ -453,17 +462,20 @@ impl<'a> BuildEnvironment<'a> {
         path
     }
 
-    pub fn assemble_sources_to_rebuild<'b>(&mut self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, pch: bool, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
+    pub fn assemble_sources_to_rebuild<'b>(&mut self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, cached_warnings: &mut Vec<String>, pch: bool, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
+            let warning_cache_path = self.get_artifact_path(path, &self.warning_cache_path, "warnings");
             obj_paths.push(obj_path.clone());
             let is_pch = path.file_name() == Some(OsStr::new("pch.cpp")) && path.parent() == Some(&self.src_dir_path);
-            let should_rebuild = !is_pch && if let Some(dependencies) = self.discover_src_deps(path)? {
-                let dependencies = DependencyBuilder::default()
+            let dependencies = self.discover_src_deps(path)?.map(|dependencies| {
+                DependencyBuilder::default()
                     .file(path)
                     .files(dependencies)
-                    .build();
+                    .build()
+            });
+            let should_rebuild = !is_pch && if let Some(dependencies) = &dependencies {
                 self.should_build_artifact(dependencies, &obj_path)?
             } else {
                 true
@@ -472,11 +484,26 @@ impl<'a> BuildEnvironment<'a> {
             
             if should_rebuild {
                 sources.push(path.clone());
+            } else {
+                let warning_cache_out_of_date = if let Some(dependencies) = &dependencies {
+                    self.should_build_artifact(dependencies, &warning_cache_path)?
+                } else {
+                    true
+                };
+                if !warning_cache_out_of_date {
+                    if let Ok(warning_cache) = fs::read_to_string(warning_cache_path) {
+                        if let Ok(warning_cache) = serde_json::from_str::<WarningCache>(&warning_cache) {
+                            for warning in warning_cache.warnings {
+                                cached_warnings.push(warning);
+                            }
+                        }
+                    }
+                }
             }
         }
 
         for child in &paths.children {
-            self.assemble_sources_to_rebuild(child, obj_paths, pch, sources)?;
+            self.assemble_sources_to_rebuild(child, obj_paths, cached_warnings, pch, sources)?;
         }
 
         Ok(())
@@ -489,7 +516,8 @@ impl<'a> BuildEnvironment<'a> {
         pch: bool,
     ) -> Result<(), BuildError> {
         let mut jobs = Vec::new();
-        self.assemble_sources_to_rebuild(paths, obj_paths, pch, &mut jobs)?;
+        let mut cached_warnings = Vec::new();
+        self.assemble_sources_to_rebuild(paths, obj_paths, &mut cached_warnings, pch, &mut jobs)?;
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
         let mut job_futures = Vec::new();
         for job in jobs {
@@ -515,6 +543,13 @@ impl<'a> BuildEnvironment<'a> {
                 }
             }
         }
+
+        for warning in cached_warnings {
+            if self.unique_compiler_output.lock().unwrap().insert(warning.clone()) {
+                println!("{}", warning);
+            }
+        }
+
         if fail > 0 {
             println!("Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
         }
@@ -608,15 +643,21 @@ impl<'a> BuildEnvironment<'a> {
         let unique_output = self.unique_compiler_output.clone();
         let handle = task::spawn(async move {
             // let unique_output = ;
+            let mut warning_cache = WarningCache::default();
             while let Some(output) = rx.recv().await {
-                if unique_output.lock().unwrap().insert(output.clone()) {
-                    match output {
-                        CompilerOutput::Begun { first_line } => println!("{}", first_line),
-                        CompilerOutput::Error(error) => println!("{}", error),
-                        CompilerOutput::Warning(warning) => println!("{}", warning),
+                match &output {
+                    CompilerOutput::Begun { first_line } => println!("{}", first_line),
+                    CompilerOutput::Error(s) | CompilerOutput::Warning(s) => {
+                        if unique_output.lock().unwrap().insert(s.clone()) {
+                            println!("{}", s);
+                        }
+                        if matches!(output, CompilerOutput::Warning(_)) {
+                            warning_cache.warnings.push(s.clone());
+                        }
                     }
                 }
             }
+            warning_cache
         });
 
         let val = if compile_cxx(&self.toolchain_paths, flags, tx).await {
@@ -624,7 +665,13 @@ impl<'a> BuildEnvironment<'a> {
         } else {
             Err(BuildError::CompilerError)
         };
-        let _ = handle.await;
+        let warning_cache = handle.await.unwrap();
+        let warning_cache_path = self.get_artifact_path(path, &self.warning_cache_path, "warnings");
+        if let Some(parent) = warning_cache_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let warning_cache = serde_json::to_string(&warning_cache).unwrap();
+        fs::write(warning_cache_path, warning_cache)?;
         val
     }
 
