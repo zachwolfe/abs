@@ -605,9 +605,9 @@ impl<'a> BuildEnvironment<'a> {
         task::spawn(async move {
             while let Some(output) = rx.recv().await {
                 match output {
-                    CompilerOutput::Begun { first_line } => println!("{}", first_line),
-                    CompilerOutput::Error(error) => println!("{}", error),
-                    CompilerOutput::Warning(warning) => println!("{}", warning),
+                    CompilerOutput::Begun { first_line } => println!("\nBEGIN:\n{}\nEND\n", first_line),
+                    CompilerOutput::Error(error) => println!("\nBEGIN:\n{}\nEND\n", error),
+                    CompilerOutput::Warning(warning) => println!("\nBEGIN:\n{}\nEND\n", warning),
                 }
             }
         });

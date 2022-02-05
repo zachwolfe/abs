@@ -18,7 +18,7 @@ mod build_manager;
 mod toolchain_paths;
 
 use proj_config::{ProjectConfig, OutputType, CxxOptions, Platform};
-use cmd_options::{CmdOptions, CompileMode, Subcommand, BuildOptions};
+use cmd_options::{CmdOptions, CompileMode, Subcommand, Target, BuildOptions};
 use build::BuildEnvironment;
 use toolchain_paths::ToolchainPaths;
 

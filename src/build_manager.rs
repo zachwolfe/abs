@@ -74,6 +74,7 @@ pub enum CompilerOutput {
 pub async fn compile_cxx(toolchain_paths: &ToolchainPaths, compile_flags: CompileFlags, output_channel: mpsc::UnboundedSender<CompilerOutput>) -> bool {
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
     task::spawn(async move {
+        #[derive(Debug)]
         enum ParseState {
             NoFileName,
             Neutral,
@@ -82,6 +83,21 @@ pub async fn compile_cxx(toolchain_paths: &ToolchainPaths, compile_flags: Compil
         }
 
         let mut state = ParseState::NoFileName;
+        let mut chunk = String::new();
+        fn state_transition(line: &str) -> Option<ParseState> {
+            if let Some(index) = line.find(": ") {
+                let bytes = line.as_bytes();
+                if bytes.len() > index + 2 {
+                    let after = &bytes[(index + 2)..];
+                    if after.starts_with(b"warning") {
+                        return Some(ParseState::InWarning)
+                    } else if after.starts_with(b"error") || after.starts_with(b"fatal error") {
+                        return Some(ParseState::InError)
+                    }
+                }
+            }
+            None
+        }
         while let Some(line) = output_rx.recv().await {
             if let OutputLine::Stdout(line) = line {
                 let output = match state {
@@ -90,70 +106,45 @@ pub async fn compile_cxx(toolchain_paths: &ToolchainPaths, compile_flags: Compil
                         CompilerOutput::Begun { first_line: line }
                     },
                     ParseState::Neutral => {
-                        if let Some(index) = line.find(": ") {
-                            let bytes = line.as_bytes();
-                            if bytes.len() > index + 2 {
-                                let after = &bytes[(index + 2)..];
-                                if after.starts_with(b"warning") {
-                                    state = ParseState::InWarning;
-                                    CompilerOutput::Warning(line)
-                                } else if after.starts_with(b"error") || after.starts_with(b"fatal error") {
-                                    state = ParseState::InError;
-                                    CompilerOutput::Error(line)
-                                } else {
-                                    // Just keeping these around for now to catch unexpected types of input during development
-                                    debug_assert!(false, "unexpected line format");
-                                    continue;
-                                }
-                            } else {
-                                debug_assert!(false, "unexpected line format");
-                                continue;
-                            }
+                        if let Some(transition) = state_transition(&line) {
+                            state = transition;
+                            chunk = line;
                         } else {
-                            debug_assert!(false, "unexpected type of line");
-                            continue;
+                            // Just keeping this around for now to catch unexpected types of input during development
+                            debug_assert!(false, "unexpected line format");
                         }
+                        continue;
                     },
-                    ParseState::InWarning => {
-                        if let Some(index) = line.find(": ") {
-                            let bytes = line.as_bytes();
-                            if bytes.len() > index + 2 {
-                                let after = &bytes[(index + 2)..];
-                                if after.starts_with(b"error") || after.starts_with(b"fatal error") {
-                                    state = ParseState::InError;
-                                    CompilerOutput::Error(line)
-                                } else {
-                                    CompilerOutput::Warning(line)
-                                }
-                            } else {
-                                CompilerOutput::Warning(line)
-                            }
+                    ParseState::InWarning | ParseState::InError => {
+                        if let Some(transition) = state_transition(&line) {
+                            let val = match state {
+                                ParseState::InWarning => CompilerOutput::Warning(chunk),
+                                ParseState::InError => CompilerOutput::Error(chunk),
+                                _ => unreachable!("impossible state"),
+                            };
+                            chunk = line;
+                            state = transition;
+                            val
                         } else {
-                            CompilerOutput::Warning(line)
-                        }
-                    },
-                    ParseState::InError => {
-                        if let Some(index) = line.find(": ") {
-                            let bytes = line.as_bytes();
-                            if bytes.len() > index + 2 {
-                                let after = &bytes[(index + 2)..];
-                                if after.starts_with(b"warning") {
-                                    state = ParseState::InWarning;
-                                    CompilerOutput::Warning(line)
-                                } else {
-                                    CompilerOutput::Error(line)
-                                }
-                            } else {
-                                CompilerOutput::Error(line)
-                            }
-                        } else {
-                            CompilerOutput::Error(line)
+                            chunk.push('\n');
+                            chunk.push_str(&line);
+                            continue
                         }
                     },
                 };
 
                 let _ = output_channel.send(output);
             }
+        }
+
+        match state {
+            ParseState::InError => {
+                let _ = output_channel.send(CompilerOutput::Error(chunk));
+            },
+            ParseState::InWarning => {
+                let _ = output_channel.send(CompilerOutput::Warning(chunk));
+            },
+            _ => {},
         }
     });
 
