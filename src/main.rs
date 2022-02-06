@@ -380,7 +380,6 @@ void print_hello_world() {{
         
                     match env.build().await {
                         Ok(produced_artifact) => {
-                            println!("Build succeeded.");
                             let artifact_path = if produced_artifact {
                                 Some(artifact_path)
                             } else {
