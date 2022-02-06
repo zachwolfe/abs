@@ -9,8 +9,8 @@ A dead simple build system for C++ that values convention over configuration. Cr
   - Domain-specific or platform-specific preprocessing, like generating C++/WinRT projections for the Windows API, assembling application bundles for macOS, etc.
   - Package manager-like duties, like downloading dependencies
   - Moving most of the complexity of the build process into modular build scripts, enabling the core of ABS to stay simple
-- Only supports Windows for now; support for Apple platforms and Linux is planned, but not right away
 - Known limitations:
+  - Only supports Windows for now, but support for Apple platforms and Linux is planned
   - My code for finding the local Visual Studio installation is not very robust
   - Adding icons to an app is not yet supported
   - Not all ABS-originated error messages are as helpful as they should be
