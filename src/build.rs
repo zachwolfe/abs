@@ -545,7 +545,7 @@ impl<'a> BuildEnvironment<'a> {
         }
 
         for warning in cached_warnings {
-            if self.unique_compiler_output.lock().unwrap().insert(warning.clone()) {
+            if self.unique_compiler_output.lock().unwrap().insert(warning.lines().next().unwrap().to_string()) {
                 println!("{}", warning);
             }
         }
@@ -648,7 +648,7 @@ impl<'a> BuildEnvironment<'a> {
                 match &output {
                     CompilerOutput::Begun { first_line } => println!("{}", first_line),
                     CompilerOutput::Error(s) | CompilerOutput::Warning(s) => {
-                        if unique_output.lock().unwrap().insert(s.clone()) {
+                        if unique_output.lock().unwrap().insert(s.lines().next().unwrap().to_string()) {
                             println!("{}", s);
                         }
                         if matches!(output, CompilerOutput::Warning(_)) {
