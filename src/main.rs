@@ -361,7 +361,7 @@ void print_hello_world() {{
                         CompileMode::Debug => "debug",
                         CompileMode::Release => "release",
                     };
-                    println!("Building \"{}\" for target {:?} in {} mode\n", config.name, target, mode);
+                    println!("Building \"{}\" for target {:?} in {} mode", config.name, target, mode);
     
                     let toolchain_paths = ToolchainPaths::find(target).unwrap();            
                     // Create abs/debug or abs/release, if it doesn't exist already
