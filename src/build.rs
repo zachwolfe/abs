@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 use futures::future::join_all;
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle, WeakProgressBar};
 
 use serde::{Serialize, Deserialize};
 
@@ -45,7 +45,7 @@ pub struct BuildEnvironment<'a> {
 
     file_edit_times: HashMap<PathBuf, u64>,
     unique_compiler_output: Arc<Mutex<HashSet<String>>>,
-    progress_bar: ProgressBar,
+    progress_bar: WeakProgressBar,
 }
 
 #[derive(Debug)]
@@ -256,7 +256,7 @@ impl<'a> BuildEnvironment<'a> {
 
             file_edit_times: HashMap::new(),
             unique_compiler_output: Default::default(),
-            progress_bar: ProgressBar::new(0),
+            progress_bar: ProgressBar::new(0).downgrade(),
         })
     }
 
@@ -358,7 +358,6 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     pub async fn build(&mut self) -> Result<bool, BuildError> {
-        self.progress_bar.finish_and_clear();
         let paths = match SrcPaths::from_root(&self.src_dir_path) {
             Ok(paths) => paths,
             Err(error) => {
@@ -397,12 +396,10 @@ impl<'a> BuildEnvironment<'a> {
             };
 
             if should_rebuild {
-                self.progress_bar = ProgressBar::new_spinner();
-                self.progress_bar.set_message("Generating pre-compiled header");
-                self.progress_bar.enable_steady_tick(50);
-                let res = self.compile(pch_path, &self.objs_path, PchOption::GeneratePch).await;
-                self.progress_bar.finish_and_clear();
-                res?;
+                let progress_bar = ProgressBar::new_spinner()
+                    .with_message("Generating pre-compiled header");
+                progress_bar.enable_steady_tick(50);
+                self.compile(pch_path, &self.objs_path, PchOption::GeneratePch).await?;
             }
         };
         let mut obj_paths = Vec::new();
@@ -530,19 +527,25 @@ impl<'a> BuildEnvironment<'a> {
         self.assemble_sources_to_rebuild(paths, obj_paths, &mut cached_warnings, pch, &mut jobs)?;
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
         let mut job_futures = Vec::new();
-        if !jobs.is_empty() {
+        let _progress_bar = if !jobs.is_empty() {
             if jobs.len() > 1 {
-                self.progress_bar = ProgressBar::new(jobs.len() as u64);
-                self.progress_bar.set_style(
-                    ProgressStyle::default_bar().template("{bar} Compiling source files | {pos}/{len}")
-                );
-                self.progress_bar.tick();
+                let progress_bar = ProgressBar::new(jobs.len() as u64)
+                    .with_style(
+                        ProgressStyle::default_bar().template("{bar} Compiling source files | {pos}/{len}")
+                    );
+                progress_bar.tick();
+                self.progress_bar = progress_bar.downgrade();
+                Some(progress_bar)
             } else {
-                self.progress_bar = ProgressBar::new_spinner();
-                self.progress_bar.set_message("Compiling one source file");
-                self.progress_bar.enable_steady_tick(50);
+                let progress_bar = ProgressBar::new_spinner()
+                    .with_message("Compiling one source file");
+                progress_bar.enable_steady_tick(50);
+                self.progress_bar = progress_bar.downgrade();
+                Some(progress_bar)
             }
-        }
+        } else {
+            None
+        };
         for job in jobs {
             let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
             let mut obj_subdir_path = obj_path;
@@ -572,8 +575,6 @@ impl<'a> BuildEnvironment<'a> {
                 println_above_progress_bar_if_visible!(self.progress_bar, "{}", warning);
             }
         }
-
-        self.progress_bar.finish_and_clear();
 
         if fail > 0 {
             println_above_progress_bar_if_visible!(self.progress_bar, "Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
@@ -691,7 +692,9 @@ impl<'a> BuildEnvironment<'a> {
         } else {
             Err(BuildError::CompilerError)
         };
-        self.progress_bar.inc(1);
+        if let Some(progress_bar) = self.progress_bar.upgrade() {
+            progress_bar.inc(1);
+        }
         let warning_cache = handle.await.unwrap();
         let warning_cache_path = self.get_artifact_path(path, &self.warning_cache_path, "warnings");
         if let Some(parent) = warning_cache_path.parent() {
@@ -707,9 +710,9 @@ impl<'a> BuildEnvironment<'a> {
         output_path: impl AsRef<Path>,
         obj_paths: impl IntoIterator<Item=impl AsRef<Path>> + Clone,
     ) -> Result<bool, BuildError> {
-        self.progress_bar = ProgressBar::new_spinner();
-        self.progress_bar.set_message(format!("Linking {}...", output_path.as_ref().to_string_lossy()));
-        self.progress_bar.enable_steady_tick(50);
+        let progress_bar = ProgressBar::new_spinner()
+            .with_message(format!("Linking {}", output_path.as_ref().to_string_lossy()));
+        progress_bar.enable_steady_tick(50);
 
         let host = Platform::host();
         let output_path = output_path.as_ref();
@@ -770,7 +773,6 @@ impl<'a> BuildEnvironment<'a> {
             run_cmd("link.exe", &args, &self.toolchain_paths.bin_paths, BuildError::LinkerError)?;
             Ok(true)
         };
-        self.progress_bar.finish_and_clear();
         res
     }
 }
