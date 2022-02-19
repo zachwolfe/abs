@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::fs::{self, File};
 use std::io::{self, BufReader};
+use std::pin::Pin;
 use std::process::Command;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::prelude::*;
@@ -8,7 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::array::IntoIter;
 use std::iter::once;
 use std::sync::{Arc, Mutex};
+use std::future::Future;
 
+use async_recursion::async_recursion;
 use futures::future::join_all;
 
 use indicatif::{ProgressBar, ProgressStyle, WeakProgressBar};
@@ -392,7 +395,7 @@ impl<'a> BuildEnvironment<'a> {
                 let progress_bar = ProgressBar::new_spinner()
                     .with_message("Generating pre-compiled header");
                 progress_bar.enable_steady_tick(50);
-                task.run(self).await?;
+                task.run_guaranteed(self).await?;
             }
         };
         let mut obj_paths = Vec::new();
@@ -462,7 +465,15 @@ impl<'a> BuildEnvironment<'a> {
         path
     }
 
-    pub fn assemble_sources_to_rebuild<'b>(&self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, cached_warnings: &mut Vec<String>, pch: PchOption, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
+    #[async_recursion]
+    async fn compile_sources_recursive(
+        &'a self,
+        paths: &'a SrcPaths,
+        obj_paths: &mut Vec<PathBuf>,
+        jobs: &mut Vec<Pin<Box<dyn Future<Output=Result<(), BuildError>> + Send + 'a>>>,
+        progress_bar: &mut Option<ProgressBar>,
+        pch: PchOption,
+    ) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
@@ -470,6 +481,7 @@ impl<'a> BuildEnvironment<'a> {
 
             obj_paths.push(obj_path.clone());
 
+            // TODO: create warning cache Task and move that into there?
             let dependencies = self.discover_src_deps(path)?.map(|dependencies| {
                 DependencyBuilder::default()
                     .file(path)
@@ -477,9 +489,33 @@ impl<'a> BuildEnvironment<'a> {
                     .build()
             });
 
-            let task = CxxTask::compile(path, pch);
+            let task = CxxTask::compile(&path, pch);
             if task.previous_valid_run(self)?.is_none() {
-                sources.push(path.clone());
+                if let Some(progress_bar) = progress_bar {
+                    progress_bar.inc_length(1);
+                } else {
+                    let pb = ProgressBar::new(1)
+                        .with_style(
+                            ProgressStyle::default_bar().template("{bar} Compiling source files | {pos}/{len}")
+                        );
+                    *self.progress_bar.lock().unwrap() = pb.downgrade();
+    
+                    // TODO: this is a hack and shouldn't be necessary. the only time the
+                    // progress bar updates is when something changes, and that should already
+                    // trigger an update without this line. But it doesn't for some reason...
+                    pb.enable_steady_tick(30);
+                    *progress_bar = Some(pb);
+                };
+                let obj_path = self.get_artifact_path(&path, &self.objs_path, "obj");
+                let mut obj_subdir_path = obj_path;
+                obj_subdir_path.pop();
+                fs::create_dir_all(&obj_subdir_path).unwrap();
+    
+                let fut = Box::pin(async move {
+                    let task = CxxTask::compile(path, pch);
+                    task.run(self).await.map(|_| ())
+                });
+                jobs.push(fut);
             } else {
                 let warning_cache_out_of_date = if let Some(dependencies) = &dependencies {
                     self.should_build_artifact(dependencies, &warning_cache_path)?
@@ -490,7 +526,9 @@ impl<'a> BuildEnvironment<'a> {
                     if let Ok(warning_cache) = fs::read_to_string(warning_cache_path) {
                         if let Ok(warning_cache) = serde_json::from_str::<WarningCache>(&warning_cache) {
                             for warning in warning_cache.warnings {
-                                cached_warnings.push(warning);
+                                if self.unique_compiler_output.lock().unwrap().insert(warning.lines().next().unwrap().to_string()) {
+                                    println_above_progress_bar_if_visible!(self.progress_bar.lock().unwrap(), "{}", warning);
+                                }
                             }
                         }
                     }
@@ -499,68 +537,34 @@ impl<'a> BuildEnvironment<'a> {
         }
 
         for child in &paths.children {
-            self.assemble_sources_to_rebuild(child, obj_paths, cached_warnings, pch, sources)?;
+            self.compile_sources_recursive(child, obj_paths, jobs, progress_bar, pch).await?;
         }
 
         Ok(())
     }
+
     pub async fn compile_sources<'b>(
         &self,
         paths: &'b SrcPaths,
         obj_paths: &mut Vec<PathBuf>,
         pch: bool,
     ) -> Result<(), BuildError> {
-        let mut jobs = Vec::new();
-        let mut cached_warnings = Vec::new();
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
-        self.assemble_sources_to_rebuild(paths, obj_paths, &mut cached_warnings, pch_option, &mut jobs)?;
-        let mut job_futures = Vec::new();
+        let mut jobs = Vec::new();
         let mut progress_bar: Option<ProgressBar> = None;
-        for job in jobs {
-            if let Some(progress_bar) = &progress_bar {
-                progress_bar.inc_length(1);
-                progress_bar.tick();
-            } else {
-                let pb = ProgressBar::new(1)
-                    .with_style(
-                        ProgressStyle::default_bar().template("{bar} Compiling source files | {pos}/{len}")
-                    );
-                *self.progress_bar.lock().unwrap() = pb.downgrade();
+        self.compile_sources_recursive(paths, obj_paths, &mut jobs, &mut progress_bar, pch_option).await?;
 
-                // TODO: this is a hack and shouldn't be necessary. the only time the
-                // progress bar updates is when something changes, and that should already
-                // trigger an update without this line. But it doesn't for some reason...
-                pb.enable_steady_tick(30);
-                progress_bar = Some(pb);
-            };
-            let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
-            let mut obj_subdir_path = obj_path;
-            obj_subdir_path.pop();
-            fs::create_dir_all(&obj_subdir_path).unwrap();
-
-            let fut = async move {
-                let task = CxxTask::compile(job, pch_option);
-                task.run(self).await.map(|_| ())
-            };
-            job_futures.push(fut);
-        }
         let mut res = Ok(());
         let mut succ = 0;
         let mut fail = 0;
-        let num_jobs = job_futures.len();
-        for job_res in join_all(job_futures).await {
+        let num_jobs = jobs.len();
+        for job_res in join_all(jobs).await {
             match job_res {
                 Ok(()) => succ += 1,
                 Err(err) => {
                     res = Err(err);
                     fail += 1;
                 }
-            }
-        }
-
-        for warning in cached_warnings {
-            if self.unique_compiler_output.lock().unwrap().insert(warning.lines().next().unwrap().to_string()) {
-                println_above_progress_bar_if_visible!(self.progress_bar.lock().unwrap(), "{}", warning);
             }
         }
 
