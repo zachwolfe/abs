@@ -16,7 +16,7 @@ use crate::println_above_progress_bar_if_visible;
 
 #[async_trait]
 pub trait Task {
-    fn previous_valid_run(&self, env: &mut BuildEnvironment) -> Result<PathBuf, BuildError>;
+    fn previous_valid_run(&self, env: &mut BuildEnvironment) -> Result<Option<PathBuf>, BuildError>;
     async fn run_guaranteed(&self, env: &mut BuildEnvironment) -> Result<PathBuf, BuildError>;
 }
 
@@ -27,7 +27,7 @@ pub trait TaskExt: Task {
 #[async_trait]
 impl<T: Task + Sync> TaskExt for T {
     async fn run(&self, env: &mut BuildEnvironment) -> Result<PathBuf, BuildError> {
-        if let Ok(prev) = self.previous_valid_run(env) {
+        if let Some(prev) = self.previous_valid_run(env)? {
             Ok(prev)
         } else {
             self.run_guaranteed(env).await
@@ -39,8 +39,8 @@ pub struct IdentityTask(PathBuf);
 
 #[async_trait]
 impl Task for IdentityTask {
-    fn previous_valid_run(&self, _env: &mut BuildEnvironment) -> Result<PathBuf, BuildError> {
-        Ok(self.0.clone())
+    fn previous_valid_run(&self, _env: &mut BuildEnvironment) -> Result<Option<PathBuf>, BuildError> {
+        Ok(Some(self.0.clone()))
     }
 
     async fn run_guaranteed(&self, _env: &mut BuildEnvironment) -> Result<PathBuf, BuildError> {
@@ -51,15 +51,20 @@ impl Task for IdentityTask {
 pub struct CxxTask { src: Box<dyn TaskExt + Sync + Send>, pch: PchOption }
 
 impl CxxTask {
-    fn compile(src: impl Into<PathBuf>, pch: PchOption) -> Self {
+    pub fn compile(src: impl Into<PathBuf>, pch: PchOption) -> Self {
         Self { src: Box::new(IdentityTask(src.into())), pch }
     }
 }
 
 #[async_trait]
 impl Task for CxxTask {
-    fn previous_valid_run(&self, env: &mut BuildEnvironment) -> Result<PathBuf, BuildError> {
+    fn previous_valid_run(&self, env: &mut BuildEnvironment) -> Result<Option<PathBuf>, BuildError> {
         let path = self.src.previous_valid_run(env)?;
+        let path = if let Some(path) = path {
+            path
+        } else {
+            return Ok(None)
+        };
         let generating_pch = matches!(self.pch, PchOption::GeneratePch);
         let extension = if generating_pch {
             "pch"
@@ -97,9 +102,9 @@ impl Task for CxxTask {
         };
 
         if should_rebuild {
-            Ok(artifact_path)
+            Ok(None)
         } else {
-            Err(BuildError::NoPreviousRun)
+            Ok(Some(artifact_path))
         }
     }
 
@@ -154,7 +159,7 @@ impl Task for CxxTask {
 
         let (tx, mut rx) = mpsc::unbounded_channel::<CompilerOutput>();
         let unique_output = env.unique_compiler_output.clone();
-        let progress_bar = env.progress_bar.clone();
+        let progress_bar = env.progress_bar.lock().unwrap().clone();
         let handle = task::spawn(async move {
             // let unique_output = ;
             let mut warning_cache = WarningCache::default();
@@ -179,7 +184,7 @@ impl Task for CxxTask {
         } else {
             Err(BuildError::CompilerError)
         };
-        if let Some(progress_bar) = env.progress_bar.upgrade() {
+        if let Some(progress_bar) = env.progress_bar.lock().unwrap().upgrade() {
             progress_bar.inc(1);
         }
         let warning_cache = handle.await.unwrap();

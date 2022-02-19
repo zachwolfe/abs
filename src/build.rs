@@ -23,6 +23,7 @@ use crate::canonicalize;
 use crate::toolchain_paths::ToolchainPaths;
 use crate::build_manager::{CompilerOutput, CompileFlags, compile_cxx};
 use crate::println_above_progress_bar_if_visible;
+use crate::task::{CxxTask, Task, TaskExt};
 
 // TODO: All fields of BuildEnvironment should be made private again after task.rs
 // stops depending on being able to access them.
@@ -47,7 +48,7 @@ pub struct BuildEnvironment<'a> {
 
     pub file_edit_times: HashMap<PathBuf, u64>,
     pub unique_compiler_output: Arc<Mutex<HashSet<String>>>,
-    pub progress_bar: WeakProgressBar,
+    pub progress_bar: Mutex<WeakProgressBar>,
 }
 
 #[derive(Debug)]
@@ -57,7 +58,6 @@ pub enum BuildError {
     DiscoverSrcDepsError,
     CompilerError,
     LinkerError,
-    NoPreviousRun,
 
     IoError(io::Error),
 }
@@ -259,7 +259,7 @@ impl<'a> BuildEnvironment<'a> {
 
             file_edit_times: HashMap::new(),
             unique_compiler_output: Default::default(),
-            progress_bar: ProgressBar::new(0).downgrade(),
+            progress_bar: Mutex::new(ProgressBar::new(0).downgrade()),
         })
     }
 
@@ -286,7 +286,6 @@ impl<'a> BuildEnvironment<'a> {
             BuildError::DiscoverSrcDepsError => println!("unable to discover source dependencies."),
             BuildError::CompilerError => println!("unable to compile."),
             BuildError::LinkerError => println!("unable to link."),
-            BuildError::NoPreviousRun => println!("no previous run (NOTE: this error should never occur. please file a github issue for ABS.)"),
 
             BuildError::IoError(io_error) => println!("there was an io error: {:?}.", io_error.kind()),
         }
@@ -389,21 +388,12 @@ impl<'a> BuildEnvironment<'a> {
         let pch = paths.src_paths.iter().any(|path| path.file_name() == Some(OsStr::new("pch.cpp")));
         if pch {
             let pch_path = self.src_dir_path.join("pch.cpp");
-            let should_rebuild = if let Some(dependencies) = self.discover_src_deps(&pch_path)? {
-                let dependencies = DependencyBuilder::default()
-                    .file(&pch_path)
-                    .files(dependencies);
-                let gen_pch_path = self.get_artifact_path(&pch_path, &self.objs_path, "pch");
-                self.should_build_artifact(dependencies.build(), &gen_pch_path)?
-            } else {
-                true
-            };
-
-            if should_rebuild {
+            let task = CxxTask::compile(&pch_path, PchOption::GeneratePch);
+            if task.previous_valid_run(self)?.is_none() {
                 let progress_bar = ProgressBar::new_spinner()
                     .with_message("Generating pre-compiled header");
                 progress_bar.enable_steady_tick(50);
-                self.compile(pch_path, PchOption::GeneratePch).await?;
+                task.run(self).await?;
             }
         };
         let mut obj_paths = Vec::new();
@@ -445,9 +435,9 @@ impl<'a> BuildEnvironment<'a> {
         let mut package_file_paths = vec![product_path, pdb_path];
         if self.assets_dir_path.exists() && fs::metadata(&self.assets_dir_path)?.is_dir() {
             if matches!(self.config.output_type, OutputType::StaticLibrary) {
-                println_above_progress_bar_if_visible!(self.progress_bar, "Warning: {} has an assets directory, which is unsupported in static library projects. It will be ignored.", self.config.name);
+                println_above_progress_bar_if_visible!(self.progress_bar.lock().unwrap(), "Warning: {} has an assets directory, which is unsupported in static library projects. It will be ignored.", self.config.name);
                 if let Ok(canon) = canonicalize(&self.assets_dir_path) {
-                    println_above_progress_bar_if_visible!(self.progress_bar, "    assets directory found at path: \"{}\"\n", canon.as_os_str().to_string_lossy());
+                    println_above_progress_bar_if_visible!(self.progress_bar.lock().unwrap(), "    assets directory found at path: \"{}\"\n", canon.as_os_str().to_string_lossy());
                 }
             }
             package_file_paths.push(self.assets_dir_path.clone());
@@ -531,26 +521,21 @@ impl<'a> BuildEnvironment<'a> {
         self.assemble_sources_to_rebuild(paths, obj_paths, &mut cached_warnings, pch, &mut jobs)?;
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
         let mut job_futures = Vec::new();
-        let _progress_bar = if !jobs.is_empty() {
-            if jobs.len() > 1 {
-                let progress_bar = ProgressBar::new(jobs.len() as u64)
+        let mut progress_bar: Option<ProgressBar> = None;
+        for job in jobs {
+            let progress_bar = if let Some(progress_bar) = &progress_bar {
+                progress_bar
+            } else {
+                let pb = ProgressBar::new(0)
                     .with_style(
                         ProgressStyle::default_bar().template("{bar} Compiling source files | {pos}/{len}")
                     );
-                progress_bar.tick();
-                self.progress_bar = progress_bar.downgrade();
-                Some(progress_bar)
-            } else {
-                let progress_bar = ProgressBar::new_spinner()
-                    .with_message("Compiling one source file");
-                progress_bar.enable_steady_tick(50);
-                self.progress_bar = progress_bar.downgrade();
-                Some(progress_bar)
-            }
-        } else {
-            None
-        };
-        for job in jobs {
+                *self.progress_bar.lock().unwrap() = pb.downgrade();
+                progress_bar = Some(pb);
+                progress_bar.as_ref().unwrap()
+            };
+            progress_bar.inc_length(1);
+            progress_bar.tick();
             let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
             let mut obj_subdir_path = obj_path;
             obj_subdir_path.pop();
@@ -575,12 +560,12 @@ impl<'a> BuildEnvironment<'a> {
 
         for warning in cached_warnings {
             if self.unique_compiler_output.lock().unwrap().insert(warning.lines().next().unwrap().to_string()) {
-                println_above_progress_bar_if_visible!(self.progress_bar, "{}", warning);
+                println_above_progress_bar_if_visible!(self.progress_bar.lock().unwrap(), "{}", warning);
             }
         }
 
         if fail > 0 {
-            println_above_progress_bar_if_visible!(self.progress_bar, "Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
+            println_above_progress_bar_if_visible!(self.progress_bar.lock().unwrap(), "Compiled: {}/{} | Failed: {}/{}", succ, num_jobs, fail, num_jobs);
         }
         res
     }
@@ -671,7 +656,7 @@ impl<'a> BuildEnvironment<'a> {
 
         let (tx, mut rx) = mpsc::unbounded_channel::<CompilerOutput>();
         let unique_output = self.unique_compiler_output.clone();
-        let progress_bar = self.progress_bar.clone();
+        let progress_bar = self.progress_bar.lock().unwrap().clone();
         let handle = task::spawn(async move {
             // let unique_output = ;
             let mut warning_cache = WarningCache::default();
@@ -696,7 +681,7 @@ impl<'a> BuildEnvironment<'a> {
         } else {
             Err(BuildError::CompilerError)
         };
-        if let Some(progress_bar) = self.progress_bar.upgrade() {
+        if let Some(progress_bar) = self.progress_bar.lock().unwrap().upgrade() {
             progress_bar.inc(1);
         }
         let warning_cache = handle.await.unwrap();
