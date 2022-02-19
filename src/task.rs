@@ -16,17 +16,17 @@ use crate::println_above_progress_bar_if_visible;
 
 #[async_trait]
 pub trait Task {
-    fn previous_valid_run(&self, env: &mut BuildEnvironment) -> Result<Option<PathBuf>, BuildError>;
-    async fn run_guaranteed(&self, env: &mut BuildEnvironment) -> Result<PathBuf, BuildError>;
+    fn previous_valid_run(&self, env: &BuildEnvironment) -> Result<Option<PathBuf>, BuildError>;
+    async fn run_guaranteed(&self, env: &BuildEnvironment) -> Result<PathBuf, BuildError>;
 }
 
 #[async_trait]
 pub trait TaskExt: Task {
-    async fn run(&self, env: &mut BuildEnvironment) -> Result<PathBuf, BuildError>;
+    async fn run(&self, env: &BuildEnvironment) -> Result<PathBuf, BuildError>;
 }
 #[async_trait]
 impl<T: Task + Sync> TaskExt for T {
-    async fn run(&self, env: &mut BuildEnvironment) -> Result<PathBuf, BuildError> {
+    async fn run(&self, env: &BuildEnvironment) -> Result<PathBuf, BuildError> {
         if let Some(prev) = self.previous_valid_run(env)? {
             Ok(prev)
         } else {
@@ -39,11 +39,11 @@ pub struct IdentityTask(PathBuf);
 
 #[async_trait]
 impl Task for IdentityTask {
-    fn previous_valid_run(&self, _env: &mut BuildEnvironment) -> Result<Option<PathBuf>, BuildError> {
+    fn previous_valid_run(&self, _env: &BuildEnvironment) -> Result<Option<PathBuf>, BuildError> {
         Ok(Some(self.0.clone()))
     }
 
-    async fn run_guaranteed(&self, _env: &mut BuildEnvironment) -> Result<PathBuf, BuildError> {
+    async fn run_guaranteed(&self, _env: &BuildEnvironment) -> Result<PathBuf, BuildError> {
         Ok(self.0.clone())
     }
 }
@@ -58,7 +58,7 @@ impl CxxTask {
 
 #[async_trait]
 impl Task for CxxTask {
-    fn previous_valid_run(&self, env: &mut BuildEnvironment) -> Result<Option<PathBuf>, BuildError> {
+    fn previous_valid_run(&self, env: &BuildEnvironment) -> Result<Option<PathBuf>, BuildError> {
         let path = self.src.previous_valid_run(env)?;
         let path = if let Some(path) = path {
             path
@@ -80,21 +80,6 @@ impl Task for CxxTask {
                 .build()
         });
 
-
-        // let pch_path = self.src_dir_path.join("pch.cpp");
-        // let should_rebuild = if let Some(dependencies) = self.discover_src_deps(&pch_path)? {
-        //     let dependencies = DependencyBuilder::default()
-        //         .file(&pch_path)
-        //         .files(dependencies);
-        //     let gen_pch_path = self.get_artifact_path(&pch_path, &self.objs_path, "pch");
-        //     self.should_build_artifact(dependencies.build(), &gen_pch_path)?
-        // } else {
-        //     true
-        // };
-
-
-
-
         let should_rebuild = (generating_pch || !is_pch) && if let Some(dependencies) = &dependencies {
             env.should_build_artifact(dependencies, &artifact_path)?
         } else {
@@ -108,7 +93,7 @@ impl Task for CxxTask {
         }
     }
 
-    async fn run_guaranteed(&self, env: &mut BuildEnvironment) -> Result<PathBuf, BuildError> {
+    async fn run_guaranteed(&self, env: &BuildEnvironment) -> Result<PathBuf, BuildError> {
         let path = self.src.run(env).await?;
         let host = Platform::host();
         let obj_path = env.objs_path.clone();

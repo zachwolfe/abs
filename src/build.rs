@@ -9,8 +9,6 @@ use std::array::IntoIter;
 use std::iter::once;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc;
-use tokio::task;
 use futures::future::join_all;
 
 use indicatif::{ProgressBar, ProgressStyle, WeakProgressBar};
@@ -18,10 +16,9 @@ use indicatif::{ProgressBar, ProgressStyle, WeakProgressBar};
 use serde::{Serialize, Deserialize};
 
 use crate::proj_config::{Platform, Os, ProjectConfig, OutputType};
-use crate::cmd_options::{BuildOptions, CompileMode};
+use crate::cmd_options::BuildOptions;
 use crate::canonicalize;
 use crate::toolchain_paths::ToolchainPaths;
-use crate::build_manager::{CompilerOutput, CompileFlags, compile_cxx};
 use crate::println_above_progress_bar_if_visible;
 use crate::task::{CxxTask, Task, TaskExt};
 
@@ -46,7 +43,7 @@ pub struct BuildEnvironment<'a> {
     pub dependency_headers_path: PathBuf,
     pub warning_cache_path: PathBuf,
 
-    pub file_edit_times: HashMap<PathBuf, u64>,
+    pub file_edit_times: Mutex<HashMap<PathBuf, u64>>,
     pub unique_compiler_output: Arc<Mutex<HashSet<String>>>,
     pub progress_bar: Mutex<WeakProgressBar>,
 }
@@ -257,15 +254,16 @@ impl<'a> BuildEnvironment<'a> {
             dependency_headers_path,
             warning_cache_path,
 
-            file_edit_times: HashMap::new(),
+            file_edit_times: Default::default(),
             unique_compiler_output: Default::default(),
             progress_bar: Mutex::new(ProgressBar::new(0).downgrade()),
         })
     }
 
-    fn edit_time(&mut self, path: impl AsRef<Path>, fallback: u64) -> io::Result<u64> {
+    fn edit_time(&self, path: impl AsRef<Path>, fallback: u64) -> io::Result<u64> {
         let path = path.as_ref();
-        if let Some(&edit_time) = self.file_edit_times.get(path) {
+        let mut edit_times = self.file_edit_times.lock().unwrap();
+        if let Some(&edit_time) = edit_times.get(path) {
             Ok(edit_time)
         } else {
             let time = match fs::metadata(path) {
@@ -273,7 +271,7 @@ impl<'a> BuildEnvironment<'a> {
                 Err(err) if matches!(err.kind(), io::ErrorKind::NotFound) => fallback,
                 Err(err) => return Err(err),
             };
-            self.file_edit_times.insert(path.to_owned(), time);
+            edit_times.insert(path.to_owned(), time);
             Ok(time)
         }
     }
@@ -293,7 +291,7 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     fn should_build_artifacts_impl(
-        &mut self,
+        &self,
         dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>,
         artifact_paths: impl IntoIterator<Item=impl AsRef<Path>> + Clone,
         mut filter: impl FnMut(&Path) -> bool,
@@ -324,19 +322,19 @@ impl<'a> BuildEnvironment<'a> {
         // Invalidate edit times of all artifact paths
         if should_build_artifacts {
             for artifact in artifact_paths {
-                self.file_edit_times.remove(artifact.as_ref());
+                self.file_edit_times.lock().unwrap().remove(artifact.as_ref());
             }
         }
 
         Ok(should_build_artifacts)
     }
 
-    pub fn should_build_artifact(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path> + Clone) -> io::Result<bool> {
+    pub fn should_build_artifact(&self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path> + Clone) -> io::Result<bool> {
         self.should_build_artifacts_impl(dependency_paths, IntoIter::new([artifact_path]), |_| true)
     }
 
     #[allow(unused)]
-    fn should_build_artifacts(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path>, extensions: impl IntoIterator<Item=impl AsRef<OsStr>> + Clone) -> io::Result<bool> {
+    fn should_build_artifacts(&self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path>, extensions: impl IntoIterator<Item=impl AsRef<OsStr>> + Clone) -> io::Result<bool> {
         let artifact_path = artifact_path.as_ref();
         if !artifact_path.exists() { return Ok(true); }
         let artifact_paths: Result<Vec<_>, _> = fs::read_dir(artifact_path)?.map(|entry| entry.map(|entry| entry.path())).collect();
@@ -463,7 +461,7 @@ impl<'a> BuildEnvironment<'a> {
         path
     }
 
-    pub fn assemble_sources_to_rebuild<'b>(&mut self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, cached_warnings: &mut Vec<String>, pch: bool, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
+    pub fn assemble_sources_to_rebuild<'b>(&self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, cached_warnings: &mut Vec<String>, pch: bool, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
@@ -511,7 +509,7 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     pub async fn compile_sources<'b>(
-        &mut self,
+        &self,
         paths: &'b SrcPaths,
         obj_paths: &mut Vec<PathBuf>,
         pch: bool,
@@ -541,7 +539,10 @@ impl<'a> BuildEnvironment<'a> {
             obj_subdir_path.pop();
             fs::create_dir_all(&obj_subdir_path).unwrap();
 
-            let fut = self.compile(job, pch_option);
+            let fut = async move {
+                let task = CxxTask::compile(job, pch_option);
+                task.run(self).await.map(|_| ())
+            };
             job_futures.push(fut);
         }
         let mut res = Ok(());
@@ -570,7 +571,7 @@ impl<'a> BuildEnvironment<'a> {
         res
     }
 
-    pub fn discover_src_deps(&mut self, path: impl AsRef<Path>) -> Result<Option<Vec<PathBuf>>, BuildError> {
+    pub fn discover_src_deps(&self, path: impl AsRef<Path>) -> Result<Option<Vec<PathBuf>>, BuildError> {
         // TODO: Support MSVC's versioning
         #[derive(Deserialize)]
         struct SrcDeps {
@@ -605,95 +606,6 @@ impl<'a> BuildEnvironment<'a> {
             Ok(Some(dependencies.build()))
         }
     }
-    
-    async fn compile(&self, path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
-        let path = path.as_ref();
-        let host = Platform::host();
-        let obj_path = self.objs_path.clone();
-        let flags = match host.os() {
-            Os::Windows => {
-                let mut flags = CompileFlags::empty()
-                    .singles([
-                        "/W3",
-                        "/Zi",
-                        "/EHsc",
-                        "/c",
-                        "/FS",
-                    ])
-                    .rtti(self.config.cxx_options.rtti)
-                    .async_await(self.config.cxx_options.async_await)
-                    .cxx_standard(self.config.cxx_options.standard);
-
-                match self.build_options.compile_mode {
-                    CompileMode::Debug => flags = flags.singles(["/MDd", "/RTC1"]),
-                    CompileMode::Release => flags = flags.single("/O2"),
-                }
-                flags = flags
-                    .defines(self.definitions.iter().cloned())
-                    .include_paths(&self.toolchain_paths.include_paths)
-                    .include_paths([
-                        &self.dependency_headers_path,
-                        &self.src_dir_path,
-                    ]);
-                match pch {
-                    PchOption::GeneratePch | PchOption::UsePch => {
-                        let path = self.get_artifact_path(self.src_dir_path.join("pch.h"), &obj_path, "pch");
-                        flags = flags.pch_path(path, matches!(pch, PchOption::GeneratePch));
-                    },
-                    _ => {}
-                }
-                let src_deps_json_path = self.get_artifact_path(&path, &self.src_deps_path, "json");
-                let src_deps_parent = src_deps_json_path.parent().unwrap();
-                fs::create_dir_all(src_deps_parent)?;
-                flags = flags
-                    .obj_path(self.get_artifact_path(path, &obj_path, "obj"))
-                    .double("/Fd", self.objs_path.join(&format!("{}.pdb", &self.config.name)))
-                    .double("/sourceDependencies", src_deps_json_path)
-                    .src_path(path);
-                flags
-            },
-        };
-
-        let (tx, mut rx) = mpsc::unbounded_channel::<CompilerOutput>();
-        let unique_output = self.unique_compiler_output.clone();
-        let progress_bar = self.progress_bar.lock().unwrap().clone();
-        let handle = task::spawn(async move {
-            // let unique_output = ;
-            let mut warning_cache = WarningCache::default();
-            while let Some(output) = rx.recv().await {
-                match &output {
-                    CompilerOutput::Begun { .. } => {},
-                    CompilerOutput::Error(s) | CompilerOutput::Warning(s) => {
-                        if unique_output.lock().unwrap().insert(s.lines().next().unwrap().to_string()) {
-                            println_above_progress_bar_if_visible!(progress_bar, "{}", s);
-                        }
-                        if matches!(output, CompilerOutput::Warning(_)) {
-                            warning_cache.warnings.push(s.clone());
-                        }
-                    }
-                }
-            }
-            warning_cache
-        });
-
-        let val = if compile_cxx(&self.toolchain_paths, flags, tx).await {
-            Ok(())
-        } else {
-            Err(BuildError::CompilerError)
-        };
-        if let Some(progress_bar) = self.progress_bar.lock().unwrap().upgrade() {
-            progress_bar.inc(1);
-        }
-        let warning_cache = handle.await.unwrap();
-        let warning_cache_path = self.get_artifact_path(path, &self.warning_cache_path, "warnings");
-        if let Some(parent) = warning_cache_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let warning_cache = serde_json::to_string(&warning_cache).unwrap();
-        fs::write(warning_cache_path, warning_cache)?;
-        val
-    }
-
     pub fn link(
         &mut self,
         output_path: impl AsRef<Path>,
