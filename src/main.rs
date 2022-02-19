@@ -16,6 +16,7 @@ mod cmd_options;
 mod proj_config;
 mod build_manager;
 mod toolchain_paths;
+mod task;
 mod progress_bar;
 
 use proj_config::{ProjectConfig, OutputType, CxxOptions, Platform};

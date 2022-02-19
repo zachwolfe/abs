@@ -24,28 +24,30 @@ use crate::toolchain_paths::ToolchainPaths;
 use crate::build_manager::{CompilerOutput, CompileFlags, compile_cxx};
 use crate::println_above_progress_bar_if_visible;
 
+// TODO: All fields of BuildEnvironment should be made private again after task.rs
+// stops depending on being able to access them.
 pub struct BuildEnvironment<'a> {
-    config_path: PathBuf,
-    manifest_path: Option<PathBuf>,
+    pub config_path: PathBuf,
+    pub manifest_path: Option<PathBuf>,
 
-    linker_lib_dependencies: Vec<PathBuf>,
+    pub linker_lib_dependencies: Vec<PathBuf>,
     
-    toolchain_paths: &'a ToolchainPaths,
-    config: &'a ProjectConfig,
-    build_options: &'a BuildOptions,
-    definitions: &'a [(&'a str, &'a str)],
-    project_path: PathBuf,
-    artifact_path: PathBuf,
-    src_dir_path: PathBuf,
-    assets_dir_path: PathBuf,
-    objs_path: PathBuf,
-    src_deps_path: PathBuf,
-    dependency_headers_path: PathBuf,
-    warning_cache_path: PathBuf,
+    pub toolchain_paths: &'a ToolchainPaths,
+    pub config: &'a ProjectConfig,
+    pub build_options: &'a BuildOptions,
+    pub definitions: &'a [(&'a str, &'a str)],
+    pub project_path: PathBuf,
+    pub artifact_path: PathBuf,
+    pub src_dir_path: PathBuf,
+    pub assets_dir_path: PathBuf,
+    pub objs_path: PathBuf,
+    pub src_deps_path: PathBuf,
+    pub dependency_headers_path: PathBuf,
+    pub warning_cache_path: PathBuf,
 
-    file_edit_times: HashMap<PathBuf, u64>,
-    unique_compiler_output: Arc<Mutex<HashSet<String>>>,
-    progress_bar: WeakProgressBar,
+    pub file_edit_times: HashMap<PathBuf, u64>,
+    pub unique_compiler_output: Arc<Mutex<HashSet<String>>>,
+    pub progress_bar: WeakProgressBar,
 }
 
 #[derive(Debug)]
@@ -55,6 +57,7 @@ pub enum BuildError {
     DiscoverSrcDepsError,
     CompilerError,
     LinkerError,
+    NoPreviousRun,
 
     IoError(io::Error),
 }
@@ -114,22 +117,22 @@ fn cmd_flag(flag: impl AsRef<OsStr>, argument: impl AsRef<OsStr>) -> OsString {
 }
 
 #[derive(Clone, Default)]
-struct DependencyBuilder {
+pub struct DependencyBuilder {
     dependencies: Vec<PathBuf>,
 }
 
 impl DependencyBuilder {
-    fn file(mut self, path: impl Into<PathBuf>) -> Self {
+    pub fn file(mut self, path: impl Into<PathBuf>) -> Self {
         self.dependencies.push(path.into());
         self
     }
 
-    fn files(mut self, files: impl IntoIterator<Item=impl Into<PathBuf>>) -> Self {
+    pub fn files(mut self, files: impl IntoIterator<Item=impl Into<PathBuf>>) -> Self {
         self.dependencies.extend(files.into_iter().map(|path| path.into()));
         self
     }
 
-    fn build(self) -> Vec<PathBuf> { self.dependencies }
+    pub fn build(self) -> Vec<PathBuf> { self.dependencies }
 }
 
 fn run_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, bin_paths: &[PathBuf], error: BuildError) -> Result<(), BuildError> {
@@ -175,15 +178,15 @@ fn run_ps_cmd(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<Os
 }
 
 #[derive(Copy, Clone)]
-enum PchOption {
+pub enum PchOption {
     GeneratePch,
     UsePch,
     NoPch,
 }
 
 #[derive(Default, Serialize, Deserialize)]
-struct WarningCache {
-    warnings: Vec<String>,
+pub struct WarningCache {
+    pub warnings: Vec<String>,
 }
 
 impl<'a> BuildEnvironment<'a> {
@@ -283,6 +286,7 @@ impl<'a> BuildEnvironment<'a> {
             BuildError::DiscoverSrcDepsError => println!("unable to discover source dependencies."),
             BuildError::CompilerError => println!("unable to compile."),
             BuildError::LinkerError => println!("unable to link."),
+            BuildError::NoPreviousRun => println!("no previous run (NOTE: this error should never occur. please file a github issue for ABS.)"),
 
             BuildError::IoError(io_error) => println!("there was an io error: {:?}.", io_error.kind()),
         }
@@ -328,7 +332,7 @@ impl<'a> BuildEnvironment<'a> {
         Ok(should_build_artifacts)
     }
 
-    fn should_build_artifact(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path> + Clone) -> io::Result<bool> {
+    pub fn should_build_artifact(&mut self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path> + Clone) -> io::Result<bool> {
         self.should_build_artifacts_impl(dependency_paths, IntoIter::new([artifact_path]), |_| true)
     }
 
@@ -453,7 +457,7 @@ impl<'a> BuildEnvironment<'a> {
 
     /// Goes from a src file path to an artifact path relative to output_dir_path
     /// (e.g., src/hello/world.cpp -> abs/debug/obj/hello/world.obj)
-    fn get_artifact_path(&self, src_path: impl AsRef<Path>, output_dir_path: impl AsRef<Path>, extension: impl AsRef<OsStr>) -> PathBuf {
+    pub fn get_artifact_path(&self, src_path: impl AsRef<Path>, output_dir_path: impl AsRef<Path>, extension: impl AsRef<OsStr>) -> PathBuf {
         let mut path = self.get_artifact_path_relative_to(src_path, &self.src_dir_path, output_dir_path);
         let succ = path.set_extension(extension);
         assert!(succ);
@@ -581,7 +585,7 @@ impl<'a> BuildEnvironment<'a> {
         res
     }
 
-    fn discover_src_deps(&mut self, path: impl AsRef<Path>) -> Result<Option<Vec<PathBuf>>, BuildError> {
+    pub fn discover_src_deps(&mut self, path: impl AsRef<Path>) -> Result<Option<Vec<PathBuf>>, BuildError> {
         // TODO: Support MSVC's versioning
         #[derive(Deserialize)]
         struct SrcDeps {
