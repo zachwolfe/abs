@@ -399,7 +399,7 @@ impl<'a> BuildEnvironment<'a> {
                 let progress_bar = ProgressBar::new_spinner()
                     .with_message("Generating pre-compiled header");
                 progress_bar.enable_steady_tick(50);
-                self.compile(pch_path, &self.objs_path, PchOption::GeneratePch).await?;
+                self.compile(pch_path, PchOption::GeneratePch).await?;
             }
         };
         let mut obj_paths = Vec::new();
@@ -551,9 +551,8 @@ impl<'a> BuildEnvironment<'a> {
             let mut obj_subdir_path = obj_path;
             obj_subdir_path.pop();
             fs::create_dir_all(&obj_subdir_path).unwrap();
-            let objs_path = self.objs_path.clone();
 
-            let fut = self.compile(job, objs_path, pch_option);
+            let fut = self.compile(job, pch_option);
             job_futures.push(fut);
         }
         let mut res = Ok(());
@@ -618,9 +617,10 @@ impl<'a> BuildEnvironment<'a> {
         }
     }
     
-    async fn compile(&self, path: impl AsRef<Path>, obj_path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
+    async fn compile(&self, path: impl AsRef<Path>, pch: PchOption) -> Result<(), BuildError> {
         let path = path.as_ref();
         let host = Platform::host();
+        let obj_path = self.objs_path.clone();
         let flags = match host.os() {
             Os::Windows => {
                 let mut flags = CompileFlags::empty()
