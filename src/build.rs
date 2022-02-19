@@ -321,8 +321,9 @@ impl<'a> BuildEnvironment<'a> {
 
         // Invalidate edit times of all artifact paths
         if should_build_artifacts {
+            let mut file_edit_times = self.file_edit_times.lock().unwrap();
             for artifact in artifact_paths {
-                self.file_edit_times.lock().unwrap().remove(artifact.as_ref());
+                file_edit_times.remove(artifact.as_ref());
             }
         }
 
@@ -461,27 +462,23 @@ impl<'a> BuildEnvironment<'a> {
         path
     }
 
-    pub fn assemble_sources_to_rebuild<'b>(&self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, cached_warnings: &mut Vec<String>, pch: bool, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
+    pub fn assemble_sources_to_rebuild<'b>(&self, paths: &'b SrcPaths, obj_paths: &mut Vec<PathBuf>, cached_warnings: &mut Vec<String>, pch: PchOption, sources: &mut Vec<PathBuf>) -> Result<(), BuildError> {
         fs::create_dir_all(&paths.root).unwrap();
         for path in paths.src_paths.iter() {
             let obj_path = self.get_artifact_path(path, &self.objs_path, "obj");
             let warning_cache_path = self.get_artifact_path(path, &self.warning_cache_path, "warnings");
+
             obj_paths.push(obj_path.clone());
-            let is_pch = path.file_name() == Some(OsStr::new("pch.cpp")) && path.parent() == Some(&self.src_dir_path);
+
             let dependencies = self.discover_src_deps(path)?.map(|dependencies| {
                 DependencyBuilder::default()
                     .file(path)
                     .files(dependencies)
                     .build()
             });
-            let should_rebuild = !is_pch && if let Some(dependencies) = &dependencies {
-                self.should_build_artifact(dependencies, &obj_path)?
-            } else {
-                true
-            };
 
-            
-            if should_rebuild {
+            let task = CxxTask::compile(path, pch);
+            if task.previous_valid_run(self)?.is_none() {
                 sources.push(path.clone());
             } else {
                 let warning_cache_out_of_date = if let Some(dependencies) = &dependencies {
@@ -507,7 +504,6 @@ impl<'a> BuildEnvironment<'a> {
 
         Ok(())
     }
-
     pub async fn compile_sources<'b>(
         &self,
         paths: &'b SrcPaths,
@@ -516,24 +512,27 @@ impl<'a> BuildEnvironment<'a> {
     ) -> Result<(), BuildError> {
         let mut jobs = Vec::new();
         let mut cached_warnings = Vec::new();
-        self.assemble_sources_to_rebuild(paths, obj_paths, &mut cached_warnings, pch, &mut jobs)?;
         let pch_option = if pch { PchOption::UsePch } else { PchOption::NoPch };
+        self.assemble_sources_to_rebuild(paths, obj_paths, &mut cached_warnings, pch_option, &mut jobs)?;
         let mut job_futures = Vec::new();
         let mut progress_bar: Option<ProgressBar> = None;
         for job in jobs {
-            let progress_bar = if let Some(progress_bar) = &progress_bar {
-                progress_bar
+            if let Some(progress_bar) = &progress_bar {
+                progress_bar.inc_length(1);
+                progress_bar.tick();
             } else {
-                let pb = ProgressBar::new(0)
+                let pb = ProgressBar::new(1)
                     .with_style(
                         ProgressStyle::default_bar().template("{bar} Compiling source files | {pos}/{len}")
                     );
                 *self.progress_bar.lock().unwrap() = pb.downgrade();
+
+                // TODO: this is a hack and shouldn't be necessary. the only time the
+                // progress bar updates is when something changes, and that should already
+                // trigger an update without this line. But it doesn't for some reason...
+                pb.enable_steady_tick(30);
                 progress_bar = Some(pb);
-                progress_bar.as_ref().unwrap()
             };
-            progress_bar.inc_length(1);
-            progress_bar.tick();
             let obj_path = self.get_artifact_path(&job, &self.objs_path, "obj");
             let mut obj_subdir_path = obj_path;
             obj_subdir_path.pop();
