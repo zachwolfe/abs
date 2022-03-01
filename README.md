@@ -1,16 +1,19 @@
 # ABS: A Build System
-A dead simple build system for C++ that values convention over configuration. Created due to my distaste for other build systems. This project is in its infancy; feel free to file issues.
+A simple, (aspirationally) powerful build system for C++. Written in Rust, because who wants to write more C++ than is strictly necessary? Created due to my distaste for other build systems. Manages the build process by directly calling into your C/++ toolchain, rather than generating Makefiles or IDE projects. This project is in its infancy; feel free to file issues.
 
 ## Current Status & Future Plans (up to date as of February 6, 2022)
 - Supports building GUI apps, console apps, dynamic libraries and static libraries
   - Both 32-bit and 64-bit
-- I currently use a minimal JSON manifest format for project-specific configuration. This format *might* be replaced with build scripts written in C++. This could enable things like:
-  - Building code written in programming languages other than C++
+- I currently use a minimal JSON manifest format for project-specific configuration. This format is *intended* to be replaced with build scripts written in C++. This could enable things like:
+  - Building source code written in programming languages other than C++
   - Domain-specific or platform-specific preprocessing, like generating C++/WinRT projections for the Windows API, assembling application bundles for macOS, etc.
   - Package manager-like duties, like downloading dependencies
   - Moving most of the complexity of the build process into modular build scripts, enabling the core of ABS to stay simple
+- I plan to support C++20 modules.
+- I might expose ABS as a library to be linked in with the compiled program, which could be neat for making things like hot code reloading during development easier to accomplish.
+- I might implement a simple C/++ reflection preprocessor, which could automatically generate reflection information for every data type in the program. This could be relied upon by libraries like [ZW](https://github.com/zachwolfe/zw) in order to sensibly print any C++ value.
 - Known limitations:
-  - Only supports Windows for now, but support for Apple platforms and Linux is planned
+  - Only supports Windows for now, but support for Apple platforms, Android and Linux is planned
   - My code for finding the local Visual Studio installation is not very robust
   - Adding icons to an app is not yet supported
   - Not all ABS-originated error messages are as helpful as they should be
