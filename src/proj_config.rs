@@ -94,7 +94,7 @@ pub enum OutputType {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, clap::Parser)]
 #[serde(rename_all="snake_case")]
 pub enum Platform {
-    Win32, Win64,
+    Win32, Win64, Linux32, Linux64,
 }
 
 impl Platform {
@@ -105,21 +105,34 @@ impl Platform {
             } else if cfg!(target_pointer_width = "64") {
                 Self::Win64
             } else {
-                panic!("Unsupported bit width of host platform.");
+                panic!("Unsupported host Windows bit width.");
+            }
+        } else if cfg!(target_os = "linux") {
+            if cfg!(target_pointer_width = "32") {
+                Self::Linux32
+            } else if cfg!(target_pointer_width = "64") {
+                Self::Linux64
+            } else {
+                panic!("Unsupported host Linux bit width.");
             }
         } else {
-            panic!("Unsupported target os.");
+            panic!("Unsupported host os.");
         }
     }
 
     pub fn os(&self) -> Os {
-        Os::Windows
+        match self {
+            Platform::Win32 | Platform::Win64 => Os::Windows,
+            Platform::Linux32 | Platform::Linux64 => Os::Linux,
+        }
     }
 
     pub fn architecture(&self) -> Arch {
         match self {
             Platform::Win32 => Arch::X86,
             Platform::Win64 => Arch::X64,
+            Platform::Linux32 => Arch::X86,
+            Platform::Linux64 => Arch::X64,
         }
     }
 
@@ -128,12 +141,15 @@ impl Platform {
         match self {
             Platform::Win32 => matches!(other, Platform::Win32),
             Platform::Win64 => matches!(other.os(), Os::Windows),
+            Platform::Linux32 => matches!(other, Platform::Linux32),
+            Platform::Linux64 => matches!(other.os(), Os::Linux),
         }
     }
 }
 
 pub enum Os {
     Windows,
+    Linux,
 }
 
 pub enum Arch {

@@ -218,6 +218,9 @@ impl<'a> BuildEnvironment<'a> {
                     }
                 }
                 dependencies.build()
+            },
+            Os::Linux => {
+                vec!["todo.a".into()]
             }
         };
         let artifact_path = artifact_path.into();
@@ -655,6 +658,9 @@ impl<'a> BuildEnvironment<'a> {
                     flags.push(cmd_flag("/LIBPATH:", path));
                 }
                 flags
+            },
+            Os::Linux => {
+                vec!["todo".into()]
             }
         };
         args.push(

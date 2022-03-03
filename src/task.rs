@@ -97,6 +97,7 @@ impl Task for CxxTask {
         let path = self.src.run(env).await?;
         let host = Platform::host();
         let obj_path = env.objs_path.clone();
+        // TODO: instead of matching over the host OS here, perhaps it would be better to match over the compiler vendor
         let (flags, obj_path) = match host.os() {
             Os::Windows => {
                 let mut flags = CompileFlags::empty()
@@ -140,6 +141,10 @@ impl Task for CxxTask {
                     .src_path(&path);
                 (flags, obj_path)
             },
+            Os::Linux => {
+                // TODO: implement
+                (CompileFlags::empty(), env.get_artifact_path(&path, &obj_path, "o"))
+            }
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel::<CompilerOutput>();
