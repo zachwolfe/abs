@@ -5,7 +5,6 @@ use std::pin::Pin;
 use std::process::Command;
 use std::ffi::{OsStr, OsString};
 use std::collections::{HashMap, HashSet};
-use std::array::IntoIter;
 use std::iter::once;
 use std::sync::{Arc, Mutex};
 use std::future::Future;
@@ -168,7 +167,7 @@ fn get_ps_args(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<O
             command.push(arg);
         }
     }
-    IntoIter::new(["-command".into(), command])
+    ["-command".into(), command]
 }
 
 #[allow(unused)]
@@ -336,7 +335,7 @@ impl<'a> BuildEnvironment<'a> {
     }
 
     pub fn should_build_artifact(&self, dependency_paths: impl IntoIterator<Item=impl AsRef<Path>>, artifact_path: impl AsRef<Path> + Clone) -> io::Result<bool> {
-        self.should_build_artifacts_impl(dependency_paths, IntoIter::new([artifact_path]), |_| true)
+        self.should_build_artifacts_impl(dependency_paths, [artifact_path], |_| true)
     }
 
     #[allow(unused)]
