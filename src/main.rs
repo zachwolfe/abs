@@ -54,7 +54,6 @@ pub fn canonicalize(p: impl AsRef<Path>) -> IoResult<PathBuf> {
     }
 }
 
-#[cfg(target_os = "windows")]
 #[tokio::main]
 async fn main() {
     let options = CmdOptions::parse();

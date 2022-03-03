@@ -4,7 +4,6 @@ use std::io::{self, BufReader};
 use std::pin::Pin;
 use std::process::Command;
 use std::ffi::{OsStr, OsString};
-use std::os::windows::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::array::IntoIter;
 use std::iter::once;
@@ -15,8 +14,8 @@ use async_recursion::async_recursion;
 use futures::future::join_all;
 
 use indicatif::{ProgressBar, ProgressStyle, WeakProgressBar};
-
 use serde::{Serialize, Deserialize};
+use filetime::FileTime;
 
 use crate::proj_config::{Platform, Os, ProjectConfig, OutputType};
 use crate::cmd_options::BuildOptions;
@@ -46,7 +45,7 @@ pub struct BuildEnvironment<'a> {
     pub dependency_headers_path: PathBuf,
     pub warning_cache_path: PathBuf,
 
-    pub file_edit_times: Mutex<HashMap<PathBuf, u64>>,
+    pub file_edit_times: Mutex<HashMap<PathBuf, FileTime>>,
     pub unique_compiler_output: Arc<Mutex<HashSet<String>>>,
     pub progress_bar: Mutex<WeakProgressBar>,
 }
@@ -263,14 +262,14 @@ impl<'a> BuildEnvironment<'a> {
         })
     }
 
-    fn edit_time(&self, path: impl AsRef<Path>, fallback: u64) -> io::Result<u64> {
+    fn edit_time(&self, path: impl AsRef<Path>, fallback: FileTime) -> io::Result<FileTime> {
         let path = path.as_ref();
         let mut edit_times = self.file_edit_times.lock().unwrap();
         if let Some(&edit_time) = edit_times.get(path) {
             Ok(edit_time)
         } else {
             let time = match fs::metadata(path) {
-                Ok(metadata) => metadata.last_write_time(),
+                Ok(metadata) => FileTime::from_last_modification_time(&metadata),
                 Err(err) if matches!(err.kind(), io::ErrorKind::NotFound) => fallback,
                 Err(err) => return Err(err),
             };
@@ -302,23 +301,23 @@ impl<'a> BuildEnvironment<'a> {
         // If the config file has changed, I want to rebuild the whole project, so unconditionally add it
         // as a dependency.
         let config_path = self.config_path.clone();
-        let config_edit_time = self.edit_time(config_path, u64::MAX);
+        let config_edit_time = self.edit_time(config_path, FileTime::now());
         // TODO: shouldn't really be necessary to collect in a Vec here.
         let dependencies: Result<Vec<_>, _> = dependency_paths.into_iter()
-            .map(|path| self.edit_time(path, u64::MAX))
+            .map(|path| self.edit_time(path, FileTime::now()))
             .chain(once(config_edit_time))
             .collect();
         let dependencies = dependencies?;
-        let newest_dependency = dependencies.into_iter().max().unwrap_or(0u64);
+        let newest_dependency = dependencies.into_iter().max().unwrap_or(FileTime::zero());
 
         let artifacts: Result<Vec<_>, _> = artifact_paths.clone().into_iter()
             .filter(|path|
                 filter(path.as_ref())
             )
-            .map(|path| self.edit_time(path, 0u64))
+            .map(|path| self.edit_time(path, FileTime::zero()))
             .collect();
         let artifacts = artifacts?;
-        let oldest_artifact = artifacts.into_iter().min().unwrap_or(0u64);
+        let oldest_artifact = artifacts.into_iter().min().unwrap_or(FileTime::zero());
 
         let should_build_artifacts = newest_dependency > oldest_artifact;
 
