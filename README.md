@@ -1,10 +1,10 @@
 # ABS: A Build System
-A simple, (aspirationally) powerful build system for C++. Written in Rust, because who wants to write more C++ than is strictly necessary? Created due to my distaste for other build systems. Manages the build process by directly calling into your C/++ toolchain, rather than generating Makefiles or IDE projects. This project is in its infancy; feel free to file issues.
+A simple, (aspirationally) powerful build system for C++. Created due to my distaste for other build systems. Manages the build process by directly calling into your C/++ toolchain, rather than generating Makefiles or IDE projects. This project is in its infancy; feel free to file issues.
 
 ## Current Status & Future Plans (up to date as of February 6, 2022)
 - Supports building GUI apps, console apps, dynamic libraries and static libraries
   - Both 32-bit and 64-bit
-- I currently use a minimal JSON manifest format for project-specific configuration. This format is *intended* to be replaced with build scripts written in C++. This could enable things like:
+- I currently use a minimal JSON manifest format for project-specific configuration. This format is intended to be replaced with build scripts written in C++. This could enable things like:
   - Building source code written in programming languages other than C++
   - Domain-specific or platform-specific preprocessing, like generating C++/WinRT projections for the Windows API, assembling application bundles for macOS, etc.
   - Package manager-like duties, like downloading dependencies
