@@ -513,7 +513,6 @@ impl<'a> BuildEnvironment<'a> {
                 fs::create_dir_all(&obj_subdir_path).unwrap();
     
                 let fut = Box::pin(async move {
-                    let task = CxxTask::compile(path, pch);
                     task.run(self).await.map(|_| ())
                 });
                 jobs.push(fut);
