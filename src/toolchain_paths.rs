@@ -220,7 +220,7 @@ impl ToolchainPaths {
                         debugger_path: PathBuf::new(),
                         include_paths,
                         lib_paths: vec![],
-                        bin_paths: vec!["/usr/bin".into()],
+                        bin_paths: vec![],
                         vendor,
                     }
                 )

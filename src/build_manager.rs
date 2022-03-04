@@ -10,7 +10,7 @@ use tokio::io::{BufReader, AsyncBufReadExt};
 use tokio::sync::mpsc;
 use tokio::task;
 
-use crate::toolchain_paths::ToolchainPaths;
+use crate::toolchain_paths::{ToolchainPaths, Vendor};
 use crate::proj_config::CxxStandard;
 
 #[derive(Debug)]
@@ -20,9 +20,17 @@ pub enum OutputLine {
 }
 
 pub async fn run_cmd(name: impl AsRef<OsStr>, args: impl IntoIterator<Item=impl AsRef<OsStr>>, bin_paths: &[PathBuf], output_channel: mpsc::UnboundedSender<OutputLine>) -> bool {
-    let mut path = OsString::from("%PATH%");
+    let mut path = if let Some(path) = std::env::var_os("PATH") {
+        path
+    } else {
+        return false
+    };
     for i in 0..bin_paths.len() {
-        path.push(";");
+        if cfg!(os = "windows") {
+            path.push(";");
+        } else {
+            path.push(":");
+        }
         path.push(bin_paths[i].as_os_str());
     }
     let child = Command::new(name)
@@ -99,41 +107,49 @@ pub async fn compile_cxx(toolchain_paths: &ToolchainPaths, compile_flags: Compil
             None
         }
         while let Some(line) = output_rx.recv().await {
-            if let OutputLine::Stdout(line) = line {
-                let output = match state {
-                    ParseState::NoFileName => {
-                        state = ParseState::Neutral;
-                        CompilerOutput::Begun { first_line: line }
-                    },
-                    ParseState::Neutral => {
-                        if let Some(transition) = state_transition(&line) {
-                            state = transition;
-                            chunk = line;
-                        } else {
-                            // Just keeping this around for now to catch unexpected types of input during development
-                            debug_assert!(false, "unexpected line format");
-                        }
-                        continue;
-                    },
-                    ParseState::InWarning | ParseState::InError => {
-                        if let Some(transition) = state_transition(&line) {
-                            let val = match state {
-                                ParseState::InWarning => CompilerOutput::Warning(chunk),
-                                ParseState::InError => CompilerOutput::Error(chunk),
-                                _ => unreachable!("impossible state"),
-                            };
-                            chunk = line;
-                            state = transition;
-                            val
-                        } else {
-                            chunk.push('\n');
-                            chunk.push_str(&line);
-                            continue
-                        }
-                    },
+            if !cfg!(os = "windows") {
+                let output = match line {
+                    OutputLine::Stdout(line) => CompilerOutput::Error(format!("STDOUT: {}", line)),
+                    OutputLine::Stderr(line) => CompilerOutput::Error(format!("STDERR: {}", line)),
                 };
-
                 let _ = output_channel.send(output);
+            } else {
+                if let OutputLine::Stdout(line) = line {
+                    let output = match state {
+                        ParseState::NoFileName => {
+                            state = ParseState::Neutral;
+                            CompilerOutput::Begun { first_line: line }
+                        },
+                        ParseState::Neutral => {
+                            if let Some(transition) = state_transition(&line) {
+                                state = transition;
+                                chunk = line;
+                            } else {
+                                // Just keeping this around for now to catch unexpected types of input during development
+                                debug_assert!(false, "unexpected line format");
+                            }
+                            continue;
+                        },
+                        ParseState::InWarning | ParseState::InError => {
+                            if let Some(transition) = state_transition(&line) {
+                                let val = match state {
+                                    ParseState::InWarning => CompilerOutput::Warning(chunk),
+                                    ParseState::InError => CompilerOutput::Error(chunk),
+                                    _ => unreachable!("impossible state"),
+                                };
+                                chunk = line;
+                                state = transition;
+                                val
+                            } else {
+                                chunk.push('\n');
+                                chunk.push_str(&line);
+                                continue
+                            }
+                        },
+                    };
+    
+                    let _ = output_channel.send(output);
+                }
             }
         }
 
@@ -148,7 +164,11 @@ pub async fn compile_cxx(toolchain_paths: &ToolchainPaths, compile_flags: Compil
         }
     });
 
-    run_cmd("cl.exe", compile_flags.build(), &toolchain_paths.bin_paths, output_tx).await
+    let compiler_name = match toolchain_paths.vendor {
+        Vendor::Msvc => "cl.exe",
+        Vendor::Clang => "clang",
+    };
+    run_cmd(compiler_name, compile_flags.build(), &toolchain_paths.bin_paths, output_tx).await
 }
 
 pub enum CompileFlag {
